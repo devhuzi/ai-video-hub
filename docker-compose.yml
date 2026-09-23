@@ -1,0 +1,12 @@
+services:
+  app:
+    build: .
+    image: ai-video-production-hub:latest
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    env_file:
+      - .env
+    volumes:
+      # SQLite DB, uploaded logos, Script Studio renders, local final videos, rembg model cache
+      - ./data:/app/data

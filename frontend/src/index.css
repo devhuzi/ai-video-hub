@@ -1,0 +1,88 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Design tokens. Values are RGB channels so Tailwind opacity modifiers work.
+ * Dark is the primary theme; light applies when the OS prefers it.
+ * Text/background pairs are checked against WCAG AA (4.5:1) — fg-muted is the
+ * lowest-contrast text token and passes on every surface token.
+ */
+:root {
+  color-scheme: dark;
+  --canvas: 10 10 11;          /* #0a0a0b */
+  --surface: 17 17 19;         /* #111113 */
+  --raised: 24 24 27;          /* #18181b */
+  --hover: 31 31 35;           /* #1f1f23 */
+  --line: 39 39 42;            /* #27272a */
+  --line-strong: 63 63 70;     /* #3f3f46 */
+  --fg: 237 237 239;           /* #ededef */
+  --fg-secondary: 161 161 170; /* #a1a1aa */
+  --fg-muted: 139 139 148;     /* #8b8b94 — 4.86:1 on hover, 5.25:1 on raised */
+  --accent: 110 86 207;        /* #6e56cf — white text 5.39:1 */
+  --accent-hover: 98 72 196;     /* #6248c4 — white text 6.4:1 */
+  --accent-fg: 255 255 255;
+  --ring: 139 124 246;         /* #8b7cf6 — 5.95:1 on canvas */
+  --destructive: 220 38 38;    /* #dc2626 — white text 4.83:1 */
+  --destructive-fg: 255 255 255;
+  --status-running: 96 165 250;    /* #60a5fa */
+  --status-completed: 74 222 128;  /* #4ade80 */
+  --status-failed: 248 113 113;    /* #f87171 */
+  --status-paused: 251 191 36;     /* #fbbf24 */
+  --status-neutral: 161 161 170;   /* #a1a1aa */
+  --overlay: 0 0 0;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+    --canvas: 250 250 250;
+    --surface: 255 255 255;
+    --raised: 244 244 245;
+    --hover: 236 236 239;
+    --line: 228 228 231;
+    --line-strong: 212 212 216;
+    --fg: 24 24 27;
+    --fg-secondary: 82 82 91;
+    --fg-muted: 99 99 107;         /* #63636b — 5.05:1 on hover */
+    --accent: 110 86 207;
+    --accent-hover: 96 72 192;
+    --accent-fg: 255 255 255;
+    --ring: 110 86 207;
+    --destructive: 220 38 38;
+    --destructive-fg: 255 255 255;
+    --status-running: 29 78 216;     /* #1d4ed8 */
+    --status-completed: 22 101 52;   /* #166534 */
+    --status-failed: 185 28 28;      /* #b91c1c */
+    --status-paused: 146 64 14;      /* #92400e */
+    --status-neutral: 82 82 91;
+    --overlay: 0 0 0;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-line;
+  }
+  html,
+  body {
+    @apply bg-canvas text-fg font-sans text-base antialiased;
+  }
+  body {
+    margin: 0;
+    font-feature-settings: "cv11", "ss01";
+  }
+  :focus-visible {
+    outline: 2px solid rgb(var(--ring));
+    outline-offset: 2px;
+  }
+  ::selection {
+    background: rgb(var(--accent) / 0.35);
+  }
+}
+
+@layer utilities {
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+}

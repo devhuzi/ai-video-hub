@@ -1,0 +1,12 @@
+fastapi==0.141.1
+uvicorn==0.53.0
+python-dotenv==1.2.1
+python-multipart==0.0.22
+pydantic==2.12.5
+httpx==0.28.1
+aiofiles==25.1.0
+aiosqlite==0.20.0
+# Logo upload validation (also a rembg dependency)
+pillow==12.3.0
+# Script Studio: logo background removal (CPU inference, imported lazily)
+rembg==2.0.59

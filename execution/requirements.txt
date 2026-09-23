@@ -1,0 +1,6 @@
+# Optional "clone a channel's style" tooling (see directives/clone_channel_style.md).
+# Not needed to run the app.
+requests>=2.32
+python-dotenv>=1.0
+google-genai>=1.0
+yt-dlp>=2025.1.1
