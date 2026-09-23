@@ -132,18 +132,25 @@ export const api = {
   createScriptPipeline: (body) => request("POST", "/script-pipelines", { body }),
 
   pausePipeline: (id) => request("POST", `/pipelines/${encodeURIComponent(id)}/pause`),
-  retryPipeline: (id) => request("POST", `/pipelines/${encodeURIComponent(id)}/retry`),
+  // `body`: optional new model selections (see RetryRequest on the backend).
+  retryPipeline: (id, body) => request("POST", `/pipelines/${encodeURIComponent(id)}/retry`, { body }),
   cancelPipeline: (id) => request("POST", `/pipelines/${encodeURIComponent(id)}/cancel`),
   deletePipeline: (id) => request("DELETE", `/pipelines/${encodeURIComponent(id)}`),
-  regenerate: (id, kind, index) =>
-    request("POST", `/pipelines/${encodeURIComponent(id)}/regenerate`, { body: { kind, index } }),
+  // `models`: optional { image_model } or { video_model } for just this item.
+  regenerate: (id, kind, index, models = {}) =>
+    request("POST", `/pipelines/${encodeURIComponent(id)}/regenerate`, { body: { kind, index, ...models } }),
 
   getSetup: (signal) => request("GET", "/setup", { signal }),
   getTtsVoices: (signal) =>
     request("GET", "/tts/voices", { signal }).then((d) => ({ items: unwrapList(d, "voices"), defaultId: null, provider: d?.provider || null })),
   // Model catalogues also report the server's default model id.
   getImageModels: (signal) =>
-    request("GET", "/images/models", { signal }).then((d) => ({ items: unwrapList(d, "models"), defaultId: d?.default || null })),
+    request("GET", "/images/models", { signal }).then((d) => ({
+      items: unwrapList(d, "models"), defaultId: d?.default || null, packDefaultId: d?.pack_default || null,
+    })),
+  getBalances: (signal) => request("GET", "/balances", { signal }),
+  getVideoModels: (signal) =>
+    request("GET", "/video/models", { signal }).then((d) => ({ items: unwrapList(d, "models"), defaultId: d?.default || null })),
   getLlmModels: (signal) =>
     request("GET", "/llm/models", { signal }).then((d) => ({ items: unwrapList(d, "models"), defaultId: d?.default || null })),
   getEstimate: (query, signal) => request("GET", "/estimate", { query, signal }),

@@ -8,6 +8,10 @@ import { api, errorMessage, mediaSrc } from "../../lib/api";
 import { cn } from "../../lib/utils";
 import { ASPECT_CLASS, GRID_CLASS, frameLabel } from "./media";
 import { providerLabel } from "../../lib/providers";
+import { SelectField } from "../ui/select";
+import { useRemoteList } from "../../hooks/useRemoteList";
+import { useSetup } from "../../hooks/useSetup";
+import { formatCredits, imageModelOptions, modelShortName, videoModelOptions } from "../../lib/models";
 
 function MediaCard({ item, kind, aspectRatio, videoSystem, canRegenerate, onRegenerate, onExpand }) {
   const src = mediaSrc(item.url);
@@ -57,7 +61,15 @@ function MediaCard({ item, kind, aspectRatio, videoSystem, canRegenerate, onRege
         {(frames || item.service) && (
           <p className="flex flex-wrap gap-x-3 text-xs text-fg-muted">
             {frames && <span>{frames}</span>}
-            {item.service && <span>{providerLabel(item.service)}</span>}
+            {item.service && (
+              <span>
+                {providerLabel(item.service)}
+                {item.model && ` · ${modelShortName(item.model)}`}
+              </span>
+            )}
+            {item.credits != null && (
+              <span className="font-mono tabular">{formatCredits(item.credits)} credits</span>
+            )}
           </p>
         )}
         {failed && item.error && <p className="break-words text-xs text-status-failed">{item.error}</p>}
@@ -105,7 +117,7 @@ export function MediaLightbox({ expanded, onClose }) {
 function regenerateDescription(confirm, pipeline, numVideos) {
   if (!confirm) return null;
   const n = confirm.index + 1;
-  const extend = pipeline.video_system === "grok_sequential_extend";
+  const extend = pipeline.video_system === "veo_extend";
   const credits = "This uses new generation credits.";
   if (confirm.kind === "image") {
     if (extend) {
@@ -119,6 +131,39 @@ function regenerateDescription(confirm, pipeline, numVideos) {
   return `Video ${n} is generated again from the same prompt and frames, then the final video is re-rendered. ${credits}`;
 }
 
+// Optional model for just the regenerated item; "" keeps the run's model.
+function ItemModelPicker({ confirm, pipeline, value, onChange }) {
+  const setup = useSetup();
+  const isImage = confirm.kind === "image";
+  const models = useRemoteList(isImage ? api.getImageModels : api.getVideoModels);
+  const extend = pipeline.video_system === "veo_extend";
+  if (!isImage && extend && confirm.index > 0) {
+    return <p className="mt-3 text-xs text-fg-muted">Later clips inherit clip 1&apos;s model, so the run&apos;s model is used.</p>;
+  }
+  const current = isImage ? pipeline.image_model : pipeline.video_model;
+  const options = [
+    { value: "", label: `Same as the run${current ? ` (${modelShortName(current)})` : ""}` },
+    ...(models.status === "ok"
+      ? isImage
+        ? imageModelOptions(models.items, setup)
+        : videoModelOptions(models.items, { isExtend: extend, aspect: pipeline.aspect_ratio })
+      : []),
+  ];
+  return (
+    <div className="mt-4">
+      <SelectField
+        id="regenerate-model"
+        label={isImage ? "Image model for this image" : "Video model for this clip"}
+        value={value}
+        onChange={onChange}
+        options={options}
+        disabled={models.status !== "ok"}
+        hint={models.status === "error" ? `Couldn't load models: ${errorMessage(models.error)}` : null}
+      />
+    </div>
+  );
+}
+
 /**
  * Images and clips of a run. Regenerating asks for confirmation because it
  * also re-renders everything downstream of the item.
@@ -127,12 +172,14 @@ export default function MediaGrid({ pipeline, images, videos, canRegenerate, onR
   const [expanded, setExpanded] = useState(null);
   const [confirm, setConfirm] = useState(null); // {kind, index}
   const [pending, setPending] = useState(false);
+  const [itemModel, setItemModel] = useState("");
   const aspect = pipeline.aspect_ratio || "16:9";
 
   const regenerate = async () => {
     setPending(true);
     try {
-      const res = await api.regenerate(pipeline.id, confirm.kind, confirm.index);
+      const models = itemModel ? { [confirm.kind === "image" ? "image_model" : "video_model"]: itemModel } : {};
+      const res = await api.regenerate(pipeline.id, confirm.kind, confirm.index, models);
       const imgs = res?.reset_images?.length ?? 0;
       const clips = res?.reset_videos?.length ?? 0;
       toast.success(
@@ -165,7 +212,10 @@ export default function MediaGrid({ pipeline, images, videos, canRegenerate, onR
               aspectRatio={aspect}
               videoSystem={pipeline.video_system}
               canRegenerate={canRegenerate}
-              onRegenerate={(k, index) => setConfirm({ kind: k, index })}
+              onRegenerate={(k, index) => {
+                setItemModel("");
+                setConfirm({ kind: k, index });
+              }}
               onExpand={setExpanded}
             />
           ))}
@@ -185,7 +235,20 @@ export default function MediaGrid({ pipeline, images, videos, canRegenerate, onR
         pending={pending}
         title={confirm?.kind === "image" ? `Regenerate image ${n}?` : `Regenerate video ${n}?`}
         confirmLabel="Regenerate"
-        description={<p>{regenerateDescription(confirm, pipeline, videos.length)}</p>}
+        description={
+          <>
+            <p>{regenerateDescription(confirm, pipeline, videos.length)}</p>
+            {confirm && (
+              <ItemModelPicker
+                key={`${confirm.kind}-${confirm.index}`}
+                confirm={confirm}
+                pipeline={pipeline}
+                value={itemModel}
+                onChange={setItemModel}
+              />
+            )}
+          </>
+        }
         onConfirm={regenerate}
       />
     </>

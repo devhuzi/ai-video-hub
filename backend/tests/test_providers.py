@@ -75,8 +75,10 @@ def test_normalize_service(value, expected):
     ("fal-ai/some-old-model", "fal-ai/some-old-model"),
     ("openai/dall-e-3", config.DEFAULT_SCENE_IMAGE_MODEL),
     (None, config.DEFAULT_SCENE_IMAGE_MODEL),
-    ("geminigen", "snapgen"),
-    ("kie", "kie"),
+    ("geminigen", "snapgen/nano-banana-2"),
+    ("kie", "kie/nano-banana-2"),
+    ("snapgen/gpt-image-2", "snapgen/gpt-image-2"),
+    ("snapgen/unknown", config.DEFAULT_SCENE_IMAGE_MODEL),
     ("straico", config.DEFAULT_SCENE_IMAGE_MODEL),
 ])
 def test_normalize_scene_image_model(value, expected):
@@ -89,9 +91,10 @@ def test_detail_view_shows_legacy_rows_under_new_names(authed):
     sql("UPDATE pipeline_images SET service='straico' WHERE pipeline_id=? AND idx=0", (pid,))
     sql("UPDATE pipeline_images SET service='kie.ai' WHERE pipeline_id=? AND idx=1", (pid,))
     sql("UPDATE pipeline_images SET service='geminigen' WHERE pipeline_id=? AND idx=2", (pid,))
+    sql("UPDATE pipelines SET image_model=NULL WHERE id=?", (pid,))  # a row from before image_model
     body = authed.get(f"/api/pipelines/{pid}").json()
-    assert body["first_image_model"] == "snapgen"
-    assert body["subsequent_images_model"] == "fal"
+    assert body["image_model"] == "snapgen/nano-banana-2"  # the legacy first-image provider's default
+    assert "first_image_model" not in body and "subsequent_images_model" not in body
     assert [i["service"] for i in body["images"]] == ["fal", "kie", "snapgen", None]
     assert {v["service"] for v in body["videos"]} == {"snapgen"}
 
@@ -100,15 +103,18 @@ def test_detail_view_shows_legacy_rows_under_new_names(authed):
         (script["id"],))
     body = authed.get(f"/api/pipelines/{script['id']}").json()
     assert body["image_gen_model"] == config.DEFAULT_SCENE_IMAGE_MODEL
-    assert body["first_image_model"] == "fal"
+    assert body["image_model"] == config.DEFAULT_SCENE_IMAGE_MODEL
 
 
 def test_create_accepts_legacy_provider_names(authed):
     resp = authed.post("/api/pipelines", json={**PACK_4_3, "first_image_model": "geminigen",
                                                "subsequent_images_model": "straico"})
     assert resp.status_code == 200, resp.text
-    row = sql("SELECT first_image_model, subsequent_images_model FROM pipelines WHERE id=?", (resp.json()["id"],))[0]
-    assert row == {"first_image_model": "snapgen", "subsequent_images_model": "fal"}
+    row = sql("SELECT image_model FROM pipelines WHERE id=?", (resp.json()["id"],))[0]
+    assert row == {"image_model": "snapgen/nano-banana-2"}  # legacy first_image_model → its default model
+    resp = authed.post("/api/pipelines", json={**PACK_4_3, "first_image_model": "straico"})
+    row = sql("SELECT image_model FROM pipelines WHERE id=?", (resp.json()["id"],))[0]
+    assert row == {"image_model": "fal-ai/nano-banana-2"}
     script = authed.post("/api/script-pipelines", json={"script_text": "Hi", "tts_voice_id": "Rachel",
                                                         "image_gen_model": "some-retired-model"})
     assert script.status_code == 200
@@ -127,14 +133,15 @@ async def test_pack_executor_normalises_stored_slot_values(database, monkeypatch
         await db.upsert_image("p-legacy", i, {"prompt": f"p{i}", "status": "pending"})
     calls = []
 
-    async def fake(i, prompt, ref, pid, aspect_ratio="16:9", preferred_service="snapgen"):
-        calls.append(preferred_service)
+    async def fake(i, prompt, ref, pid, aspect_ratio="16:9", image_model=None, reference_uuid=None):
+        calls.append(image_model)
         await db.update_image(pid, i, {"status": "completed", "url": f"https://img/{i}"})
-        return f"https://img/{i}", preferred_service, None, None
+        return f"https://img/{i}", "snapgen", None, None
 
     monkeypatch.setattr(pack, "generate_image_with_fallback", fake)
     await pack._generate_images("p-legacy", await db.find_pipeline("p-legacy"))
-    assert calls == ["snapgen", "fal"]
+    # the legacy first-image provider's default model applies to every image
+    assert calls == ["snapgen/nano-banana-2", "snapgen/nano-banana-2"]
 
 
 async def test_old_database_gets_snapgen_columns_backfilled(tmp_path):
@@ -389,35 +396,18 @@ def _form_fields(req) -> str:
     return req.content.decode("utf-8", errors="replace")
 
 
-async def test_snapgen_veo_requests_send_documented_params(monkeypatch):
-    bodies = []
-
-    def handler(req):
-        bodies.append(_form_fields(req))
-        return httpx.Response(200, json={"uuid": f"u{len(bodies)}"})
-
-    mock_http(monkeypatch, handler)
-    await snapgen.submit_veo_frames("p", "https://a.jpg", "https://b.jpg", "16:9")
-    await snapgen.submit_veo_first("p", "https://a.jpg", "16:9", 8)
-    for body in bodies:
-        assert 'name="duration"\r\n\r\n8\r\n' in body
-        assert 'name="mode_image"\r\n\r\nframe\r\n' in body
-        assert 'name="model"\r\n\r\nveo-3.1-fast\r\n' in body
-    assert bodies[0].index("https://a.jpg") < bodies[0].index("https://b.jpg")
+def _field(body: str, name: str, value) -> bool:
+    return f'name="{name}"\r\n\r\n{value}\r\n' in body
 
 
-async def test_snapgen_422_body_is_surfaced_with_portrait_hint(monkeypatch):
+async def test_snapgen_422_body_is_surfaced(monkeypatch):
     mock_http(monkeypatch, lambda req: httpx.Response(
-        422, json={"detail": [{"loc": ["body", "aspect_ratio"], "msg": "Input should be '16:9'"}]}))
+        422, json={"detail": [{"loc": ["body", "duration"], "msg": "Input should be 4, 6 or 8"}]}))
     with pytest.raises(snapgen.SnapGenError) as exc:
-        await snapgen.submit_veo_frames("p", "https://a", "https://b", "9:16")
+        await snapgen.submit_video("veo-3.1-fast", "p", ["https://a", "https://b"], "9:16", "720p", 8)
     msg = str(exc.value)
-    assert "HTTP 422" in msg and "aspect_ratio: Input should be '16:9'" in msg
-    assert "documented as 16:9 only" in msg and "Grok" in msg
-
-    with pytest.raises(snapgen.SnapGenError) as exc:
-        await snapgen.submit_veo_frames("p", "https://a", "https://b", "16:9")
-    assert "documented as 16:9 only" not in str(exc.value)
+    assert "HTTP 422" in msg and "duration: Input should be 4, 6 or 8" in msg
+    assert "Vela" not in msg
 
 
 async def test_snapgen_error_code_body_is_surfaced(monkeypatch):
@@ -481,14 +471,14 @@ async def test_fallback_skips_unconfigured_and_passes_reference(database, monkey
         kie_calls.append(ref)
         raise kie.KieCreditError("Kie.ai insufficient credits")
 
-    async def fal_gen(prompt, ref, aspect, step, log=None):
+    async def fal_gen(prompt, ref, aspect, step, log=None, model=None):
         fal_calls.append(ref)
         return "https://fal/out.jpg"
 
     monkeypatch.setattr(kie, "submit_image", kie_submit)
     monkeypatch.setattr(fal, "generate_pack_image", fal_gen)
     url, service, gen_uuid, kie_id = await images.generate_image_with_fallback(
-        1, "prompt", "https://prev.jpg", "p-fb", preferred_service="snapgen")
+        1, "prompt", "https://prev.jpg", "p-fb", image_model="snapgen/nano-banana-2")
     assert (url, service, gen_uuid, kie_id) == ("https://fal/out.jpg", "fal", None, None)
     assert kie_calls == ["https://prev.jpg"]  # credit error: no further Kie retries
     assert fal_calls == ["https://prev.jpg"]
@@ -502,17 +492,17 @@ async def test_fallback_preferred_fal_goes_first(database, monkeypatch, fast):
     await _insert_images("p-pref")
     order = []
 
-    async def fal_gen(prompt, ref, aspect, step, log=None):
+    async def fal_gen(prompt, ref, aspect, step, log=None, model=None):
         order.append("fal")
         return "https://fal/1.jpg"
 
-    async def snap_submit(*a):
+    async def snap_submit(*a, **k):
         order.append("snapgen")
         return "u"
 
     monkeypatch.setattr(fal, "generate_pack_image", fal_gen)
     monkeypatch.setattr(snapgen, "submit_image", snap_submit)
-    got = await images.generate_image_with_fallback(0, "p", None, "p-pref", preferred_service="fal")
+    got = await images.generate_image_with_fallback(0, "p", None, "p-pref", image_model="fal-ai/nano-banana-2")
     assert got[1] == "fal" and order == ["fal"]
 
 
@@ -658,7 +648,7 @@ def test_image_models_catalogue_with_fal_prices(authed, monkeypatch):
     assert by_id["fal-ai/nano-banana-2"]["price_usd"] == 0.08
     assert by_id["fal-ai/nano-banana"]["price_usd"] == 0.039
     assert by_id["fal-ai/nano-banana-pro"]["price_usd"] is None  # not a per-image unit
-    assert by_id["snapgen"]["price_usd"] is None and by_id["kie"]["provider"] == "kie"
+    assert by_id["snapgen/nano-banana-2"]["price_usd"] is None and by_id["kie/nano-banana-2"]["provider"] == "kie"
     authed.get("/api/images/models")
     assert len(calls) == 1  # cached
 
@@ -674,6 +664,8 @@ def test_estimate_pack_snapgen_only_has_no_usd(authed):
     body = authed.get("/api/estimate?kind=pack&num_images=4&num_videos=3&video_system=veo31_frame").json()
     assert body["generations"] == {"images": 4, "videos": 3, "tts": 0}
     assert body["providers"] == {"snapgen": {"images": 4, "videos": 3}}
+    assert body["snapgen_credits"] == 12  # 3 clips × 4 credits (Veo 3.1 Fast)
+    assert body["video_seconds"] == 24
     assert body["estimated_usd"] is None
     assert "straico_coins" not in body and body["notes"]
 
@@ -681,16 +673,16 @@ def test_estimate_pack_snapgen_only_has_no_usd(authed):
 def test_estimate_pack_fal_images_priced_from_api(authed, monkeypatch):
     mock_http(monkeypatch, _pricing_handler({"fal-ai/nano-banana-2": (0.08, "image"),
                                              "fal-ai/nano-banana-2/edit": (0.08, "image")}))
-    body = authed.get("/api/estimate?kind=pack&num_images=4&num_videos=3"
-                      "&first_image_model=snapgen&subsequent_images_model=straico").json()
-    assert body["providers"]["fal"] == {"images": 3} and body["providers"]["snapgen"]["images"] == 1
-    assert body["estimated_usd"] == pytest.approx(0.24)
+    body = authed.get("/api/estimate?kind=pack&num_images=4&num_videos=3&image_model=fal-ai/nano-banana-2").json()
+    assert body["providers"]["fal"] == {"images": 4} and body["providers"]["snapgen"] == {"videos": 3}
+    assert body["estimated_usd"] == pytest.approx(0.32)
+    legacy = authed.get("/api/estimate?kind=pack&num_images=4&num_videos=3&first_image_model=straico").json()
+    assert legacy["providers"]["fal"] == {"images": 4}
 
 
 def test_estimate_unknown_fal_price_is_null(authed, monkeypatch):
     mock_http(monkeypatch, _pricing_handler({"fal-ai/nano-banana-2": (0.08, "image")}))
-    body = authed.get("/api/estimate?kind=pack&num_images=2&num_videos=1&first_image_model=fal"
-                      "&subsequent_images_model=fal").json()
+    body = authed.get("/api/estimate?kind=pack&num_images=2&num_videos=1&image_model=fal-ai/nano-banana-2").json()
     assert body["estimated_usd"] is None
     assert any("did not report" in n for n in body["notes"])
 

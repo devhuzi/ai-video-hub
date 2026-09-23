@@ -1,3 +1,5 @@
+import pytest
+
 from app.pipelines.pack import video_frame_indices, videos_affected_by_image, videos_affected_by_video
 from app.views import compute_steps
 
@@ -15,7 +17,13 @@ def test_paired_bookend_frames():
 
 
 def test_extend_frames():
-    assert video_frame_indices(1, 3, "grok_sequential_extend") == [(0, None), (None, None), (None, None)]
+    assert video_frame_indices(1, 3, "veo_extend") == [(0, None), (None, None), (None, None)]
+
+
+@pytest.mark.parametrize("legacy", ["grok_sequential_extend", "veo31_sequential_extend"])
+def test_legacy_extend_systems_are_veo_extend(legacy):
+    assert video_frame_indices(1, 2, legacy) == [(0, None), (None, None)]
+    assert videos_affected_by_video(3, legacy, 0) == [0, 1, 2]
 
 
 def test_legacy_null_video_system_is_frame_mode():
@@ -27,9 +35,9 @@ def test_affected_videos():
     assert videos_affected_by_image(4, 3, "veo31_frame", 0) == [0]
     assert videos_affected_by_image(4, 4, "veo31_frame", 3) == [2, 3]
     assert videos_affected_by_image(6, 3, "veo31_frame", 3) == [1]
-    assert videos_affected_by_image(1, 3, "grok_sequential_extend", 0) == [0, 1, 2]
+    assert videos_affected_by_image(1, 3, "veo_extend", 0) == [0, 1, 2]
     assert videos_affected_by_video(3, "veo31_frame", 1) == [1]
-    assert videos_affected_by_video(4, "grok_sequential_extend", 1) == [1, 2, 3]
+    assert videos_affected_by_video(4, "veo_extend", 1) == [1, 2, 3]
 
 
 def _statuses(p):

@@ -55,6 +55,7 @@ def image_items(p: dict, rows: List[dict]) -> List[dict]:
         out.append({
             "index": r["index"], "status": status, "url": r.get("url"), "prompt": r.get("prompt"),
             "service": registry.normalize_service(r.get("service"), default=None),
+            "model": r.get("model"), "credits": r.get("credits"),
             "error": None if status == "completed" else (r.get("kie_error") or r.get("snapgen_error")),
             "first_frame_index": None, "last_frame_index": None,
         })
@@ -70,7 +71,8 @@ def video_items(p: dict, rows: List[dict]) -> List[dict]:
         status = _item_status(r.get("status"))
         out.append({
             "index": i, "status": status, "url": r.get("url"), "prompt": r.get("prompt"),
-            "service": "snapgen", "error": None if status == "completed" else r.get("error"),
+            "service": "snapgen", "model": r.get("model"), "credits": r.get("credits"),
+            "error": None if status == "completed" else r.get("error"),
             "first_frame_index": first, "last_frame_index": last,
         })
     return out
@@ -80,18 +82,26 @@ def scene_items(rows: List[dict]) -> List[dict]:
     return [{
         "index": r["index"], "text": r.get("text"), "start_sec": r.get("start_sec"), "end_sec": r.get("end_sec"),
         "image_prompt": r.get("image_prompt"), "image_url": r.get("image_url"),
-        "status": r.get("status") or "pending",
+        "status": r.get("status") or "pending", "model": r.get("image_model"),
+        "service": r.get("image_service"), "credits": r.get("credits"),
     } for r in rows]
 
 
+# Columns from before the image model / video model settings; their meaning is
+# folded into image_model and the video_* fields below.
+_LEGACY_SETTING_FIELDS = ("first_image_model", "subsequent_images_model", "video_engine", "shot_duration")
+
+
 def normalize_providers(p: dict) -> dict:
-    """Show legacy provider values stored by older versions under their current names."""
+    """Show settings stored by older versions under their current names and values."""
     if pipeline_kind(p) == "script":
         p["image_gen_model"] = registry.normalize_scene_image_model(p.get("image_gen_model"))
-        p["first_image_model"] = p["subsequent_images_model"] = registry.scene_model_provider(p["image_gen_model"])
+        p["image_model"] = p["image_gen_model"]
     else:
-        p["first_image_model"] = registry.normalize_service(p.get("first_image_model"))
-        p["subsequent_images_model"] = registry.normalize_service(p.get("subsequent_images_model"))
+        p["image_model"] = registry.pack_image_model(p)
+        p.update(registry.video_settings(p))
+    for key in _LEGACY_SETTING_FIELDS:
+        p.pop(key, None)
     return p
 
 
@@ -101,7 +111,8 @@ def list_item(row: dict) -> dict:
         "status": row.get("status"), "current_step": row.get("current_step"), "progress": row.get("progress") or 0,
         "created_at": row.get("created_at"), "updated_at": row.get("updated_at"),
         "num_images": row.get("num_images"), "num_videos": row.get("num_videos"),
-        "aspect_ratio": row.get("aspect_ratio"), "video_system": row.get("video_system"),
+        "aspect_ratio": row.get("aspect_ratio"),
+        "video_system": registry.normalize_video_system(row.get("video_system")) or row.get("video_system"),
         "final_video_url": row.get("final_video_url"), "thumbnail_url": row.get("thumbnail_url"),
         "error_message": row.get("error_message"),
     }
@@ -125,4 +136,15 @@ async def pipeline_detail(pipeline_id: str):
         p["images"] = image_items(p, await db.find_images(pipeline_id))
         p["videos"] = video_items(p, await db.find_videos(pipeline_id))
         p["scenes"] = []
+    p["credits_total"] = credits_total(p["images"] + p["videos"] + p["scenes"])
     return p
+
+
+def credits_total(items: List[dict]) -> dict:
+    """Credits providers reported for this run's items, per provider ({} when none did)."""
+    totals: dict = {}
+    for item in items:
+        credits, service = item.get("credits"), item.get("service")
+        if isinstance(credits, (int, float)) and service:
+            totals[service] = round(totals.get(service, 0) + credits, 4)
+    return totals

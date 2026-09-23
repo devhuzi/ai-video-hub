@@ -56,7 +56,7 @@ Synthesize exactly what makes this creator's visual style unique and consistent.
 You must output:
 1. THE FORMULA: A 2-3 sentence summary of the exact visual, camera, and structural formula used in these videos.
 2. SYSTEM DEFAULTS: What should be the default camera motion, lighting, and pacing for this style?
-3. RECOMMENDED VIDEO SYSTEM: Should this be generated using a static locked camera system ('veo31_frame') or a sequential/moving camera system ('grok_sequential_extend')? Why? Use veo31_frame if the camera is mostly locked/static with simple subject motion. Use grok_sequential_extend if there is heavy camera movement, continuous journey, or heavy scene changes.
+3. RECOMMENDED VIDEO SYSTEM: Should this be generated using a static locked camera system ('veo31_frame') or a sequential/moving camera system ('veo_extend')? Why? Use veo31_frame if the camera is mostly locked/static with simple subject motion. Use veo_extend if there is heavy camera movement, continuous journey, or heavy scene changes.
 4. VARIATIONS (VIDEO TYPES): Suggest 5-8 sub-variants or specific actions that could be offered to a user as drop-down options to generate content in this style. Include a name and a short description for each.
 
 Be authoritative, precise, and format your response in clean Markdown.

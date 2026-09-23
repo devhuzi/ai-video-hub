@@ -1,4 +1,4 @@
-"""Kie.ai market API: nano-banana-2 images and ElevenLabs TTS.
+"""Kie.ai market API: nano-banana-2 images, ElevenLabs TTS and the credit balance.
 
 Docs: https://docs.kie.ai/ — POST /api/v1/jobs/createTask, poll
 GET /api/v1/jobs/recordInfo?taskId=…, results in `data.resultJson`.
@@ -98,6 +98,8 @@ async def wait_for_result(task_id: str, step_label: str, max_wait: int, log: Log
             continue
         data = result.get("data") or {}
         state = data.get("state", "waiting")
+        if isinstance(data.get("creditsConsumed"), (int, float)):
+            _task_credits[task_id] = float(data["creditsConsumed"])
         if log:
             await log(f"[{step_label}] Kie.ai polling... state={state}, elapsed={elapsed}s")
         if state == "success":
@@ -110,6 +112,25 @@ async def wait_for_result(task_id: str, step_label: str, max_wait: int, log: Log
         if state == "fail":
             raise KieError(f"Kie.ai generation failed: {data.get('failMsg', 'Unknown')}")
     raise TimeoutError(f"Kie.ai timeout after {max_wait}s for {step_label}")
+
+
+# creditsConsumed reported by recordInfo, per task, until read with credits_for().
+_task_credits: dict = {}
+
+
+def credits_for(task_id: str) -> Optional[float]:
+    """Kie.ai credits a finished task consumed, or None if Kie didn't report it."""
+    return _task_credits.pop(task_id, None)
+
+
+async def balance() -> Optional[float]:
+    """Remaining Kie.ai credits (GET /api/v1/chat/credit → data)."""
+    async with httpx.AsyncClient(timeout=20) as c:
+        resp = await c.get(f"{config.KIE_BASE}/api/v1/chat/credit", headers=_headers(False))
+    if resp.status_code >= 400:
+        raise KieError(f"Kie.ai credit {describe(resp)}")
+    data = resp.json().get("data")
+    return float(data) if isinstance(data, (int, float)) else None
 
 
 def first_result_url(parsed: dict, what: str) -> str:

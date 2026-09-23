@@ -13,7 +13,7 @@
 //
 // Detection rules (see detectMode below):
 //   - N images + (N-1 or N) videos, or 2N images + N videos -> mode = "frame"  (veo31_frame)
-//   - 1 image + >=1 videos                                  -> mode = "extend" (grok_sequential_extend)
+//   - 1 image + >=1 videos                                  -> mode = "extend" (veo_extend)
 //   - anything else                                         -> error
 
 export function parsePromptPack(text) {
@@ -107,7 +107,7 @@ export function detectMode(imagePrompts, videoPrompts) {
     if (nVid < 1) {
       return { mode: null, shape: null, videoSystem: null, error: "Extend mode needs 1 image and at least 1 video prompt." };
     }
-    return { mode: "extend", shape: "extend", videoSystem: "grok_sequential_extend", error: null };
+    return { mode: "extend", shape: "extend", videoSystem: "veo_extend", error: null };
   }
 
   return { mode: null, shape: null, videoSystem: null, error: "Add at least one image prompt." };
@@ -483,15 +483,11 @@ function classifyTitleAsImageOrVideo(title, body) {
   return null;
 }
 
-// Calculate total video length in seconds for the detection chip.
-export function calculateTotalLength(mode, numVideos, videoEngine, shotDuration) {
+// Total runtime in seconds: the sum of the clip durations (every clip uses the
+// pack's chosen duration).
+export function calculateTotalLength(mode, numVideos, clipSeconds) {
   if (!mode || !numVideos) return 0;
-  if (mode === "frame") return numVideos * 8;
-  if (mode === "extend") {
-    if (videoEngine === "veo") return numVideos * 8;
-    return numVideos * (shotDuration || 6);
-  }
-  return 0;
+  return numVideos * (clipSeconds || 0);
 }
 
 // Derive a pipeline name from the parsed prompts + append a date/time suffix.

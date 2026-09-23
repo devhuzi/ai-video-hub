@@ -34,7 +34,7 @@ FramePair = Tuple[Optional[int], Optional[int]]
 
 def detect_shape(num_images: int, num_videos: int, video_system: Optional[str]) -> str:
     """'extend' | 'paired' | 'chain' | 'chain_hero' (see video_frame_indices)."""
-    if video_system == "grok_sequential_extend":
+    if registry.normalize_video_system(video_system) == "veo_extend":
         return "extend"
     if num_videos >= 1 and num_images == 2 * num_videos:
         return "paired"
@@ -73,7 +73,7 @@ def videos_affected_by_image(num_images: int, num_videos: int, video_system: Opt
 
 def videos_affected_by_video(num_videos: int, video_system: Optional[str], video_index: int) -> List[int]:
     """Extend clips continue from the previous clip, so later clips must be redone too."""
-    if video_system == "grok_sequential_extend":
+    if registry.normalize_video_system(video_system) == "veo_extend":
         return list(range(video_index, num_videos))
     return [video_index]
 
@@ -89,7 +89,10 @@ async def execute(pipeline_id: str):
         label = p.get("room_name") or "Pipeline"
         final_path = pack_work_dir(pipeline_id) / "final.mp4"
         resume = normalize_step(p.get("resume_from_step") or "generating_images", "pack")
-        await add_log(pipeline_id, f"Video system: {p.get('video_system') or 'veo31_frame'}")
+        video = registry.video_settings(p)
+        await add_log(pipeline_id, f"Video system: {video['video_system'] or 'veo31_frame'}, "
+                                   f"{_video_desc(video)}; images: "
+                                   f"{registry.pack_image_model(p)} first")
 
         if not (resume == "uploading" and final_path.exists()):
             stage = "generating_images"
@@ -123,10 +126,14 @@ async def _generate_images(pipeline_id: str, p: dict):
         raise RuntimeError("Pipeline has no image_prompts")
     rows = {r["index"]: r for r in await db.find_images(pipeline_id)}
     urls: List[Optional[str]] = [None] * num_images
+    # SnapGen history uuid per image (when SnapGen made it): Grok Image / GPT Image 2
+    # take a SnapGen reference by uuid instead of by URL.
+    uuids: List[Optional[str]] = [None] * num_images
     for i in range(num_images):
         r = rows.get(i)
         if r and r.get("status") == "completed" and r.get("url"):
             urls[i] = r["url"]
+            uuids[i] = r.get("snapgen_uuid") if r.get("service") == "snapgen" else None
 
     missing = [i for i in range(num_images) if not urls[i]]
     if not missing:
@@ -138,13 +145,16 @@ async def _generate_images(pipeline_id: str, p: dict):
         runner.checkpoint()
         # Chain consistency: reference the nearest earlier completed image.
         ref_url = next((urls[j] for j in range(i - 1, -1, -1) if urls[j]), None)
-        slot = "first_image_model" if i == 0 else "subsequent_images_model"
-        preferred = registry.normalize_service(p.get(slot))
-        prompt = (rows.get(i) or {}).get("prompt") or prompts[i]
+        ref_uuid = next((uuids[j] for j in range(i - 1, -1, -1) if urls[j]), None)
+        row = rows.get(i) or {}
+        model = registry.pack_image_model(p, row.get("model_override"))
+        prompt = row.get("prompt") or prompts[i]
         await add_log(pipeline_id, f"Generating image {i + 1}/{num_images}...")
         url, service, gen_uuid, kie_id = await generate_image_with_fallback(
-            i, prompt, ref_url, pipeline_id, p.get("aspect_ratio") or "16:9", preferred_service=preferred)
+            i, prompt, ref_url, pipeline_id, p.get("aspect_ratio") or "16:9", image_model=model,
+            reference_uuid=ref_uuid)
         urls[i] = url
+        uuids[i] = gen_uuid if service == "snapgen" else None
         done = sum(1 for u in urls if u)
         await update_state(pipeline_id, {"image_urls": [u for u in urls if u],
                                          "progress": 15 + int(40 * done / num_images)})
@@ -153,9 +163,17 @@ async def _generate_images(pipeline_id: str, p: dict):
                                            "CompletedAt": db.now_iso()})
 
 
+def _video_desc(video: dict) -> str:
+    """e.g. 'Veo 3.1 Fast 720p, 8s'."""
+    label = registry.VIDEO_MODELS[video["video_model"]]["label"]
+    res = f" {video['video_resolution']}" if video.get("video_resolution") else ""
+    return f"{label}{res}, {video['video_duration']}s"
+
+
 async def _generate_videos(pipeline_id: str, p: dict):
     num_images, num_videos = p["num_images"], p["num_videos"]
-    video_system = p.get("video_system") or "veo31_frame"
+    video = registry.video_settings(p)
+    video_system = video["video_system"] or "veo31_frame"
     aspect_ratio = p.get("aspect_ratio") or "16:9"
     prompts = p.get("video_prompts") or []
     image_urls = {r["index"]: r["url"] for r in await db.find_images(pipeline_id)
@@ -169,7 +187,12 @@ async def _generate_videos(pipeline_id: str, p: dict):
     def prompt_for(i):
         return (videos.get(i) or {}).get("prompt") or prompts[i]
 
-    if video_system == "grok_sequential_extend":
+    def video_for(i):
+        # A model chosen when regenerating just this clip wins over the pack's model.
+        override = (videos.get(i) or {}).get("model_override")
+        return registry.video_settings({**p, "video_model": override}) if override else video
+
+    if video_system == "veo_extend":
         start = next((i for i in range(num_videos) if not done(i)), num_videos)
         if start == num_videos:
             await add_log(pipeline_id, "All videos already completed.")
@@ -177,11 +200,13 @@ async def _generate_videos(pipeline_id: str, p: dict):
         prev_uuid = videos[start - 1].get("snapgen_uuid") if start > 0 else None
         if 0 not in image_urls:
             raise RuntimeError("Image 1 must be completed before extend-mode video generation")
-        engine = "veo" if (p.get("video_engine") or "grok") == "veo" else "grok"
-        await add_log(pipeline_id, f"Sequential extend with {engine}, starting at clip {start + 1}")
+        # Later clips inherit clip 1's model, so only clip 1's model choice matters.
+        chain = video_for(0) if start == 0 else registry.video_settings(
+            {**p, "video_model": videos[0].get("model") or video["video_model"]})
+        await add_log(pipeline_id, f"Sequential Veo extend ({_video_desc(chain)}), starting at clip {start + 1}")
         await generate_sequential_extend_videos(
-            pipeline_id, engine, [prompt_for(i) for i in range(start, num_videos)], image_urls[0],
-            aspect_ratio, int(p.get("shot_duration") or 6), start_index=start, initial_prev_uuid=prev_uuid)
+            pipeline_id, chain, [prompt_for(i) for i in range(start, num_videos)], image_urls[0],
+            aspect_ratio, start_index=start, initial_prev_uuid=prev_uuid)
     else:
         frames = video_frame_indices(num_images, num_videos, video_system)
         jobs = []
@@ -201,7 +226,8 @@ async def _generate_videos(pipeline_id: str, p: dict):
         else:
             await add_log(pipeline_id, f"Sending {len(jobs)} video generation request(s) in parallel...")
             results = await asyncio.gather(
-                *[generate_frame_video(i, pr, fu, lu, pipeline_id, aspect_ratio) for i, pr, fu, lu in jobs],
+                *[generate_frame_video(i, pr, fu, lu, pipeline_id, aspect_ratio, video_for(i))
+                  for i, pr, fu, lu in jobs],
                 return_exceptions=True)
             # A user stop wins over provider failures; cancel wins over pause.
             for kind in (PipelineCancelled, PipelinePaused):
@@ -217,8 +243,14 @@ async def _generate_videos(pipeline_id: str, p: dict):
 
 
 async def generate_frame_video(index: int, prompt: str, first_img: str, last_img: str,
-                               pipeline_id: str, aspect_ratio: str):
-    """Veo 3.1 first/last-frame clip with retries. Returns (url, uuid)."""
+                               pipeline_id: str, aspect_ratio: str, video: Optional[dict] = None):
+    """One frame-pack clip on the chosen SnapGen model, with retries. Returns (url, uuid).
+
+    `video` is `registry.video_settings(...)`; None means the defaults.
+    """
+    video = video or registry.video_settings({"video_model": registry.DEFAULT_VIDEO_MODEL})
+    model = video["video_model"]
+    refs = snapgen.clip_images(model, first_img, last_img)
     step = f"Video {index + 1}"
     last_error = ""
     for attempt in range(1, config.VIDEO_MAX_RETRIES + 1):
@@ -226,8 +258,9 @@ async def generate_frame_video(index: int, prompt: str, first_img: str, last_img
         gen_uuid = None
         try:
             await add_log(pipeline_id, f"[{step}] Attempt {attempt}/{config.VIDEO_MAX_RETRIES} - "
-                                       "Submitting to SnapGen (veo-3.1-fast 1080p, 8s)...")
-            gen_uuid = await snapgen.submit_veo_frames(prompt, first_img, last_img, aspect_ratio)
+                                       f"Submitting to SnapGen ({_video_desc(video)})...")
+            gen_uuid = await snapgen.submit_video(model, prompt, refs, aspect_ratio,
+                                                  video["video_resolution"], video["video_duration"])
             await add_log(pipeline_id, f"[{step}] SnapGen submitted (uuid: {gen_uuid}). Waiting up to 30 min...")
             await db.update_video(pipeline_id, index, {"snapgen_uuid": gen_uuid, "status": "generating",
                                                        "attempt": attempt, "updated_at": db.now_iso()})
@@ -236,7 +269,8 @@ async def generate_frame_video(index: int, prompt: str, first_img: str, last_img
             vid_url = snapgen.extract_video_url(completed)
             if not vid_url:
                 raise snapgen.SnapGenError("SnapGen returned no video URL")
-            await _mark_video_done(pipeline_id, index, vid_url, gen_uuid, attempt)
+            await _mark_video_done(pipeline_id, index, vid_url, gen_uuid, attempt, model,
+                                   snapgen.credits_for(gen_uuid, completed))
             await add_log(pipeline_id, f"[{step}] SUCCESS on attempt {attempt}: {vid_url}")
             return vid_url, gen_uuid
         except PipelineInterrupt:
@@ -252,40 +286,39 @@ async def generate_frame_video(index: int, prompt: str, first_img: str, last_img
     raise RuntimeError(f"[{step}] All {config.VIDEO_MAX_RETRIES} attempts failed. Last error: {last_error}")
 
 
-_EXTEND_ENGINES = {
-    "grok": ("Grok", snapgen.submit_grok_first),
-    "veo": ("Veo", snapgen.submit_veo_first),
-}
-
-
-async def generate_sequential_extend_videos(pipeline_id: str, engine: str, video_prompts: List[str],
-                                            reference_image_url: str, aspect_ratio: str, shot_duration: int,
+async def generate_sequential_extend_videos(pipeline_id: str, video: dict, video_prompts: List[str],
+                                            reference_image_url: str, aspect_ratio: str,
                                             start_index: int = 0, initial_prev_uuid: Optional[str] = None):
-    """Sequential extend for Grok or Veo 3.1.
+    """Sequential Veo extend.
 
-    Clip 0 is generated from the reference image; every later clip extends the
-    previous clip's SnapGen uuid, so clips are strictly sequential.
+    Clip 0 is generated on the chosen Veo 3.1 model with the reference image as
+    its first frame; every later clip extends the previous clip's SnapGen uuid
+    (model, aspect ratio and resolution are inherited), so clips are strictly
+    sequential.
     """
-    label, submit_first = _EXTEND_ENGINES[engine]
+    model = video["video_model"]
+    if not registry.VIDEO_MODELS[model]["supports_extend"]:
+        raise RuntimeError(f"{registry.VIDEO_MODELS[model]['label']} does not support extend packs")
     prev_uuid = initial_prev_uuid
     results = []
     for offset, prompt in enumerate(video_prompts):
         i = start_index + offset
-        step = f"{label} Video {i + 1}"
+        step = f"Veo Video {i + 1}"
         last_error = ""
         for attempt in range(1, config.VIDEO_MAX_RETRIES + 1):
             runner.checkpoint()
             try:
                 if i == 0:
                     await add_log(pipeline_id, f"[{step}] Attempt {attempt}/{config.VIDEO_MAX_RETRIES} — "
-                                               f"generate from image ({shot_duration}s)...")
-                    gen_uuid = await submit_first(prompt, reference_image_url, aspect_ratio, shot_duration)
+                                               f"generate from image ({_video_desc(video)})...")
+                    gen_uuid = await snapgen.submit_video(model, prompt, [reference_image_url], aspect_ratio,
+                                                          video["video_resolution"], video["video_duration"])
                 else:
                     if not prev_uuid:
                         raise RuntimeError(f"No previous clip uuid to extend from for clip {i + 1}")
                     await add_log(pipeline_id, f"[{step}] Attempt {attempt}/{config.VIDEO_MAX_RETRIES} — "
                                                f"extend from uuid={prev_uuid}...")
-                    gen_uuid = await snapgen.submit_extend(engine, prompt, prev_uuid)
+                    gen_uuid = await snapgen.submit_extend(prompt, prev_uuid)
                 await add_log(pipeline_id, f"[{step}] Submitted (uuid={gen_uuid}). Polling (up to 30 min)...")
                 await db.update_video(pipeline_id, i, {"snapgen_uuid": gen_uuid, "status": "generating",
                                                        "attempt": attempt, "updated_at": db.now_iso()})
@@ -293,8 +326,9 @@ async def generate_sequential_extend_videos(pipeline_id: str, engine: str, video
                                                      max_wait=config.VIDEO_POLL_TIMEOUT)
                 vid_url = snapgen.extract_video_url(completed)
                 if not vid_url:
-                    raise snapgen.SnapGenError(f"{label} returned no video URL")
-                await _mark_video_done(pipeline_id, i, vid_url, gen_uuid, attempt)
+                    raise snapgen.SnapGenError("SnapGen returned no video URL")
+                await _mark_video_done(pipeline_id, i, vid_url, gen_uuid, attempt, model,
+                                       snapgen.credits_for(gen_uuid, completed))
                 await add_log(pipeline_id, f"[{step}] SUCCESS on attempt {attempt}: {vid_url}")
                 prev_uuid = gen_uuid
                 results.append((vid_url, gen_uuid))
@@ -313,11 +347,12 @@ async def generate_sequential_extend_videos(pipeline_id: str, engine: str, video
     return results
 
 
-async def _mark_video_done(pipeline_id: str, index: int, url: str, gen_uuid: str, attempt: int):
+async def _mark_video_done(pipeline_id: str, index: int, url: str, gen_uuid: str, attempt: int,
+                           model: Optional[str] = None, credits: Optional[float] = None):
     ts = db.now_iso()
     await db.update_video(pipeline_id, index, {"status": "completed", "url": url, "snapgen_uuid": gen_uuid,
                                                "attempt": attempt, "error": None, "completed_at": ts,
-                                               "updated_at": ts})
+                                               "updated_at": ts, "model": model, "credits": credits})
     nocodb.sync_video(pipeline_id, index, {"Status": "completed", "VideoUrl": url,
                                            "SnapGenUUID": gen_uuid or "", "CompletedAt": ts})
 

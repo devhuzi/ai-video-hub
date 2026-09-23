@@ -33,18 +33,39 @@ Built for one operator (or a small team) producing AI video content for social c
 
 | Pack shape | Mode | What happens |
 |---|---|---|
-| N images + N−1 videos | Frame · chain | Clip *i* animates from image *i* to image *i+1* (Veo 3.1 first/last frame) |
+| N images + N−1 videos | Frame · chain | Clip *i* animates from image *i* to image *i+1* (first/last frame) |
 | N images + N videos | Frame · chain + hero reveal | As above, plus a final clip on the last image |
 | 2N images + N videos | Frame · paired bookends | Each clip has its own explicit first and last frame |
-| 1 image + ≥1 videos | Extend | One clip is generated from the image, then extended clip by clip (Grok or Veo 3.1) |
+| 1 image + ≥1 videos | Extend | One clip is generated from the image on Veo 3.1, then extended clip by clip (SnapGen Veo extend) |
 
-Images are generated **sequentially**, each using the previous image as a reference, so the scene stays consistent (same camera, same room, same character). Image generation falls back automatically: **SnapGen → Kie.ai → fal.ai** (providers without an API key are skipped), all using the same nano-banana model family so the look stays consistent. Clips are normalised and joined with FFmpeg.
+Every clip is rendered on **SnapGen**. You pick the video model, and the form only offers the resolutions, clip lengths and aspect ratios that model accepts:
+
+| Video model | Images used | Aspect | Resolution | Clip length | SnapGen credits / clip | Extend packs |
+|---|---|---|---|---|---|---|
+| Veo 3.1 Fast (default) | exact first/last frame | 16:9, 9:16 | 720p, 1080p | 4, 6, 8 s | 4 | yes |
+| Veo 3.1 Lite | exact first/last frame | 16:9, 9:16 | 720p, 1080p | 4, 6, 8 s | 4 | yes |
+| Veo 3.1 | exact first/last frame | 16:9, 9:16 | 720p, 1080p | 4, 6, 8 s | 100 | yes |
+| Omni Flash | references (not exact frames) | 16:9, 9:16 | 720p, 1080p | 4, 6, 8, 10 s | 13 | no |
+| Vela AI (experimental) | first image only | 16:9, 9:16, 1:1 | — | 5 s | free (daily limit) | no |
+
+Vela AI is not in SnapGen's public API docs; the app calls the endpoint SnapGen's own web app uses, so SnapGen may reject it — use a Veo model if it does. If SnapGen fails a clip after its retries, the run fails (there is no other video provider).
+
+Images are generated **sequentially**, each using the previous image as a reference, so the scene stays consistent (same camera, same room, same character). You pick one **image model**, grouped by provider:
+
+| Provider | Image models | Credits per image (as listed by SnapGen — may change) |
+|---|---|---|
+| SnapGen | Nano Banana 2 (default), Nano Banana Pro, Nano Banana 2 Lite | free (daily limit) |
+| SnapGen | Grok Image (speed mode) · GPT Image 2 (low, 1K) | 4 · 3 |
+| Kie.ai | Nano Banana 2 | billed by Kie.ai |
+| fal.ai | Nano Banana 2 / Nano Banana / Nano Banana Pro, FLUX.1 Kontext [pro], Seedream 4.0 | USD from fal's pricing API |
+
+If the chosen model fails, the next configured provider is tried along the ladder **SnapGen → Kie.ai → fal.ai** (wrapping round, providers without an API key are skipped), each with its default model (Nano Banana 2). Grok Image and GPT Image 2 take the previous image by its SnapGen id, or as an uploaded file when another provider made it. Clips are normalised and joined with FFmpeg.
 
 **Script Studio** — paste a narration script and get a finished video:
 
 1. Text-to-speech narration (ElevenLabs voices via fal.ai, with Kie.ai as backup)
 2. An LLM (any model on OpenRouter) splits the script into scenes and writes every scene's image prompt in one call
-3. One image per scene (fal.ai, SnapGen or Kie.ai), animated with slow pan/zoom (Ken Burns)
+3. One image per scene (any image model above — falling back along the same ladder if the chosen model fails), animated with slow pan/zoom (Ken Burns)
 4. Karaoke-style subtitles — the spoken word highlights in sync
 5. Optional watermark logo (background removed automatically)
 6. Final mux to MP4
@@ -52,9 +73,10 @@ Images are generated **sequentially**, each using the previous image as a refere
 **Around both:**
 
 - Queue with live progress, per-step timeline and logs
-- Pause, resume, cancel and retry; retries resume from where the run stopped instead of paying for finished work again
-- **Regenerate a single image or clip** you don't like — only that item and the clips that depend on it are re-rendered
-- Generation counts — and a USD estimate where the provider publishes prices (fal.ai) — shown before you launch
+- Pause, resume, cancel and retry; retries resume from where the run stopped instead of paying for finished work again — and can switch models (image, video, LLM, voice) for the work that's left
+- **Regenerate a single image or clip** you don't like, optionally on a different model — only that item and the clips that depend on it are re-rendered
+- Each image and clip shows the model that made it and the credits the provider reported; the run page totals them, and the settings panel shows your SnapGen and Kie.ai credit balances
+- Generation counts, SnapGen's published video credits, and a USD estimate where the provider publishes prices (fal.ai) — shown before you launch
 - A setup check that tells you exactly which API keys are missing before you can launch
 - Browser notification when a run finishes
 - Finished videos are either uploaded to **NextCloud** (public share link) or kept on the server and played/downloaded in the app
@@ -65,7 +87,7 @@ Images are generated **sequentially**, each using the previous image as a refere
 ```
 Browser ──► nginx (:80) ──► FastAPI (:8001, loopback only) ──► SQLite (/app/data)
                                    │
-                                   ├── SnapGen     images · Veo 3.1 · Grok video
+                                   ├── SnapGen     images · video (Veo 3.1, Omni Flash, Vela AI)
                                    ├── OpenRouter  LLM (Script Studio)
                                    ├── fal.ai      images · ElevenLabs TTS
                                    ├── Kie.ai      image + TTS fallback
@@ -98,7 +120,7 @@ python -c "import secrets; print(secrets.token_urlsafe(48))"
 
 | Provider | Get a key | Env variable | Needed for |
 |---|---|---|---|
-| [SnapGen](https://snapgen.ai) (formerly GeminiGen) | Sign in → API keys in your account dashboard ([docs](https://docs.snapgen.ai)) | `SNAPGEN_API_KEY` | **Prompt packs (required)** — all video (Veo 3.1, Grok) and the primary image model |
+| [SnapGen](https://snapgen.ai) (formerly GeminiGen) | Sign in → API keys in your account dashboard ([docs](https://docs.snapgen.ai)) | `SNAPGEN_API_KEY` | **Prompt packs (required)** — all video and the first image provider in the fallback ladder |
 | [OpenRouter](https://openrouter.ai) | [openrouter.ai/keys](https://openrouter.ai/keys) | `OPENROUTER_API_KEY` | **Script Studio (required)** — scene splitting and image prompts |
 | [fal.ai](https://fal.ai) | [fal.ai/dashboard/keys](https://fal.ai/dashboard/keys) | `FAL_KEY` | **Script Studio narration (required unless Kie.ai is set)**, scene images, last image fallback |
 | [Kie.ai](https://kie.ai) | [kie.ai/api-key](https://kie.ai/api-key) | `KIE_API_KEY` | Recommended — image fallback and backup narration |
@@ -264,7 +286,7 @@ All configuration is via environment variables (`.env` locally, the Environment 
 |---|---|---|---|
 | `APP_PASSWORD` | **yes** | — | Password for the web UI. The server will not start without it. |
 | `SESSION_SECRET` | recommended | derived from `APP_PASSWORD` | Key that signs login tokens (valid 7 days). Changing it — or the password — signs everyone out. |
-| `SNAPGEN_API_KEY` | for prompt packs | — | SnapGen images, Veo 3.1, Grok video. Legacy name `GEMINIGEN_API_KEY` is still read. |
+| `SNAPGEN_API_KEY` | for prompt packs | — | SnapGen images and all video (Veo 3.1, Omni Flash, Vela AI). Legacy name `GEMINIGEN_API_KEY` is still read. |
 | `OPENROUTER_API_KEY` | for Script Studio | — | OpenRouter LLM (scene split + image prompts) |
 | `FAL_KEY` | for Script Studio* | — | fal.ai ElevenLabs narration, scene images, image fallback. *Or `KIE_API_KEY` for narration. |
 | `KIE_API_KEY` | recommended | — | Kie.ai image fallback and backup narration |
@@ -358,7 +380,7 @@ Found a vulnerability? Please open a private security advisory on the repository
 | Image step fails with credit / 402 errors | Top up the provider shown in the log; the fallback chain moves on automatically where it can |
 | First Script Studio run with a logo is slow | The background-removal model (~170 MB) downloads once into `/app/data/models` |
 | Finished video has no share link | NextCloud isn't configured — use the player / download on the run page |
-| Veo clip fails with `422` on a 9:16 run | SnapGen documents Veo 3.1 / 3.1 Fast as 16:9 only. Use 16:9, or an extend-mode pack with the Grok engine for portrait |
+| A clip fails with a `4xx` error | Check the error in the run log — it carries SnapGen's own message (e.g. an unsupported setting or no credits). Vela AI errors usually mean SnapGen's API doesn't accept it; switch to a Veo model |
 | 1:1 or 9:16 output looks wrong | Pick the aspect ratio before launching; it applies to every image and clip in the run |
 
 ## Project structure

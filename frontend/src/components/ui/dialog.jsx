@@ -34,7 +34,7 @@ export function ConfirmDialog({
           <div className="mt-5 flex justify-end gap-2">
             <AlertDialog.Cancel asChild>
               <Button variant="secondary" disabled={pending}>
-                Keep it
+                Cancel
               </Button>
             </AlertDialog.Cancel>
             <Button

@@ -44,9 +44,15 @@ export default function Estimate({ query }) {
     if (g.videos != null) parts.push(plural(g.videos, "video generation"));
     if (g.tts) parts.push(plural(g.tts, "narration request"));
     const usd = formatUsd(state.data?.estimated_usd);
+    const credits = state.data?.snapgen_credits;
     content = (
       <>
         <p className="text-sm text-fg">{parts.length ? parts.join(", ") : "No generations reported."}</p>
+        {credits != null && (
+          <p className="mt-1 text-sm text-fg-secondary">
+            SnapGen: <span className="font-mono text-fg tabular">≈ {credits}</span> credits (as listed by SnapGen — may change)
+          </p>
+        )}
         {usd && (
           <p className="mt-1 text-sm text-fg-secondary">
             Priced items: about <span className="font-mono text-fg tabular">{usd}</span>

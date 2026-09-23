@@ -33,7 +33,7 @@ ADDITIVE_PIPELINE_COLUMNS = [
     ("first_image_model", "TEXT DEFAULT 'snapgen'"),
     ("subsequent_images_model", "TEXT DEFAULT 'snapgen'"),
     ("shot_duration", "INTEGER DEFAULT 6"),
-    ("video_engine", "TEXT DEFAULT 'grok'"),
+    ("video_engine", "TEXT"),  # legacy; superseded by video_model
     ("video_system", "TEXT"),
     ("pipeline_kind", "TEXT DEFAULT 'paste'"),
     ("script_text", "TEXT"),
@@ -46,6 +46,12 @@ ADDITIVE_PIPELINE_COLUMNS = [
     ("global_style", "TEXT"),
     ("animation_engine", "TEXT"),
     ("image_gen_model", "TEXT"),
+    # NULL on rows from older versions; readers fall back via registry.video_settings /
+    # registry.pack_image_model.
+    ("image_model", "TEXT"),
+    ("video_model", "TEXT"),
+    ("video_resolution", "TEXT"),
+    ("video_duration", "INTEGER"),
 ]
 
 
@@ -121,7 +127,7 @@ async def init_schema(db: aiosqlite.Connection):
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             shot_duration INTEGER NOT NULL DEFAULT 6,
-            video_engine TEXT DEFAULT 'grok',
+            video_engine TEXT,
             video_system TEXT,
             script_text TEXT,
             narration_audio_url TEXT,
@@ -207,6 +213,26 @@ async def init_schema(db: aiosqlite.Connection):
     await _relax_legacy_not_null(db)
     await _migrate_json_logs(db)
     await _add_snapgen_columns(db)
+    await _add_item_columns(db)
+
+
+# Per-item columns added after release: which model produced the item, the
+# credits the provider reported for it, and a one-off model chosen when
+# regenerating just that item.
+ADDITIVE_ITEM_COLUMNS = {
+    "pipeline_images": [("model", "TEXT"), ("credits", "REAL"), ("model_override", "TEXT")],
+    "pipeline_videos": [("model", "TEXT"), ("credits", "REAL"), ("model_override", "TEXT")],
+    "pipeline_scenes": [("image_model", "TEXT"), ("image_service", "TEXT"), ("credits", "REAL")],
+}
+
+
+async def _add_item_columns(db: aiosqlite.Connection):
+    for table, columns in ADDITIVE_ITEM_COLUMNS.items():
+        existing = await _table_columns(db, table)
+        for name, decl in columns:
+            if name not in existing:
+                await db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+    await db.commit()
 
 
 async def _table_columns(db: aiosqlite.Connection, table: str) -> dict:
@@ -489,9 +515,11 @@ async def get_logs(pipeline_id: str, limit: int = 500) -> List[str]:
 # =============================================================
 
 _IMAGE_COLS = {"prompt", "status", "service", "url", "snapgen_uuid", "kie_task_id",
-               "snapgen_error", "kie_error", "created_at", "completed_at", "updated_at"}
+               "snapgen_error", "kie_error", "created_at", "completed_at", "updated_at",
+               "model", "credits", "model_override"}
 _VIDEO_COLS = {"prompt", "status", "url", "snapgen_uuid", "first_image_url", "last_image_url",
-               "attempt", "error", "created_at", "completed_at", "updated_at"}
+               "attempt", "error", "created_at", "completed_at", "updated_at",
+               "model", "credits", "model_override"}
 
 
 async def _upsert_item(table: str, known: set, pipeline_id: str, index: int, data: dict):
@@ -580,15 +608,27 @@ async def reset_items(pipeline_id: str, image_indices: Iterable[int], video_indi
     for idx in image_indices:
         await db.execute(
             "UPDATE pipeline_images SET status='pending', url=NULL, snapgen_uuid=NULL, kie_task_id=NULL, "
-            "snapgen_error=NULL, kie_error=NULL, completed_at=NULL, updated_at=? WHERE pipeline_id=? AND idx=?",
+            "snapgen_error=NULL, kie_error=NULL, model=NULL, credits=NULL, model_override=NULL, "
+            "completed_at=NULL, updated_at=? WHERE pipeline_id=? AND idx=?",
             (ts, pipeline_id, idx),
         )
     for idx in video_indices:
         await db.execute(
             "UPDATE pipeline_videos SET status='pending', url=NULL, snapgen_uuid=NULL, error=NULL, "
+            "model=NULL, credits=NULL, model_override=NULL, "
             "attempt=0, completed_at=NULL, updated_at=? WHERE pipeline_id=? AND idx=?",
             (ts, pipeline_id, idx),
         )
+    await db.commit()
+
+
+async def clear_item_overrides(pipeline_id: str, table: str):
+    """Drop per-item model overrides on items that aren't completed, so a retry
+    with a newly chosen model applies to every remaining item."""
+    assert table in ("pipeline_images", "pipeline_videos")
+    db = await get_db()
+    await db.execute(f"UPDATE {table} SET model_override=NULL WHERE pipeline_id=? AND status != 'completed'",
+                     (pipeline_id,))
     await db.commit()
 
 

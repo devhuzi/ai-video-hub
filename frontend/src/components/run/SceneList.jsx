@@ -5,6 +5,8 @@ import { StatusBadge } from "../Status";
 import { cn } from "../../lib/utils";
 import { ASPECT_CLASS } from "./media";
 import { MediaLightbox } from "./MediaGrid";
+import { formatCredits, modelShortName } from "../../lib/models";
+import { providerLabel } from "../../lib/providers";
 
 function SceneImage({ scene, label, aspectRatio, onExpand }) {
   const src = mediaSrc(scene.image_url);
@@ -64,6 +66,16 @@ export default function SceneList({ scenes, aspectRatio }) {
                   )}
                 </p>
                 <p className="mt-1 text-sm text-fg-secondary">{scene.text}</p>
+                {scene.model && (
+                  <p className="mt-1 flex flex-wrap gap-x-3 text-xs text-fg-muted">
+                    <span>
+                      {providerLabel(scene.service)} · {modelShortName(scene.model)}
+                    </span>
+                    {scene.credits != null && (
+                      <span className="font-mono tabular">{formatCredits(scene.credits)} credits</span>
+                    )}
+                  </p>
+                )}
               </div>
             </li>
           );

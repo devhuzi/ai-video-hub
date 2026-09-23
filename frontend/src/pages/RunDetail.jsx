@@ -19,14 +19,16 @@ import {
   relativeTime, runDuration,
 } from "../lib/format";
 import { CONTAINER } from "../lib/layout";
+import { providerLabel } from "../lib/providers";
+import { formatCredits, modelLabel } from "../lib/models";
 import { cn } from "../lib/utils";
 
 const ACTIVE_INTERVAL = 2500;
 const ERROR_INTERVAL = 5000;
 
 const VIDEO_SYSTEM_LABEL = {
-  veo31_frame: "Veo 3.1 first → last frame",
-  grok_sequential_extend: "Sequential extend",
+  veo31_frame: "Frame · first → last image",
+  veo_extend: "Extend · Veo sequential",
 };
 
 function BackLink() {
@@ -222,6 +224,27 @@ export default function RunDetail() {
               <Detail label="Aspect ratio">{p.aspect_ratio || "—"}</Detail>
               {kind === "pack" && (
                 <Detail label="Pipeline">{VIDEO_SYSTEM_LABEL[p.video_system] || humanize(p.video_system) || "—"}</Detail>
+              )}
+              {kind === "pack" && p.video_model && (
+                <Detail label="Video model">
+                  <span title={p.video_model}>
+                    {[modelLabel(p.video_model), p.video_resolution, p.video_duration && `${p.video_duration}s`].filter(Boolean).join(" · ")}
+                  </span>
+                </Detail>
+              )}
+              {p.image_model && (
+                <Detail label="Image model">
+                  <span title={p.image_model}>{modelLabel(p.image_model)}</span>
+                </Detail>
+              )}
+              {Object.keys(p.credits_total || {}).length > 0 && (
+                <Detail label="Credits used">
+                  <span className="font-mono tabular">
+                    {Object.entries(p.credits_total)
+                      .map(([provider, n]) => `${providerLabel(provider)} ${formatCredits(n)}`)
+                      .join(" · ")}
+                  </span>
+                </Detail>
               )}
               {kind === "pack" && (
                 <Detail label="Images / videos">

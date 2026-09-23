@@ -48,7 +48,7 @@ CURRENT_COLUMNS = {
     "nocodb_synced", "video_title", "logs", "error_message", "created_at", "updated_at", "shot_duration",
     "video_engine", "video_system", "script_text", "narration_audio_url", "subtitle_ass_path",
     "watermark_logo_url", "animate_scenes", "tts_voice_id", "tts_model", "global_style", "animation_engine",
-    "image_gen_model",
+    "image_gen_model", "image_model", "video_model", "video_resolution", "video_duration",
 }
 LEGACY = {"category_id", "video_type_id", "vibe", "lighting", "features", "custom_text"}
 

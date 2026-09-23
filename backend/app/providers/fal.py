@@ -34,6 +34,16 @@ SCENE_IMAGE_MODELS: List[Tuple[str, str]] = [
     ("fal-ai/bytedance/seedream/v4/text-to-image", "Seedream 4.0"),
 ]
 
+# Image-edit endpoint of each curated text-to-image model (used when a pack image
+# has a reference). Models without an entry receive the reference as-is.
+EDIT_VARIANTS = {
+    "fal-ai/nano-banana-2": PACK_IMAGE_EDIT_MODEL,
+    "fal-ai/nano-banana": "fal-ai/nano-banana/edit",
+    "fal-ai/nano-banana-pro": "fal-ai/nano-banana-pro/edit",
+    "fal-ai/flux-pro/kontext/text-to-image": "fal-ai/flux-pro/kontext",
+    "fal-ai/bytedance/seedream/v4/text-to-image": "fal-ai/bytedance/seedream/v4/edit",
+}
+
 _RESOLUTION_MODELS = {"fal-ai/nano-banana-2", "fal-ai/nano-banana-2/edit",
                       "fal-ai/nano-banana-pro", "fal-ai/nano-banana-pro/edit"}
 _SEEDREAM_SIZES = {"16:9": (1920, 1080), "9:16": (1080, 1920), "1:1": (2048, 2048)}
@@ -155,10 +165,16 @@ async def generate_image(model: str, prompt: str, aspect_ratio: str, reference_u
     return url
 
 
+def pack_endpoint(model: str, has_reference: bool) -> str:
+    """The endpoint a pack image uses: the model's image-edit variant when there is
+    a reference image, the text-to-image model otherwise."""
+    return EDIT_VARIANTS.get(model, model) if has_reference else model
+
+
 async def generate_pack_image(prompt: str, reference_url: Optional[str], aspect_ratio: str,
-                              step_label: str, log: LogFn = None) -> str:
-    model = PACK_IMAGE_EDIT_MODEL if reference_url else PACK_IMAGE_MODEL
-    return await generate_image(model, prompt, aspect_ratio, reference_url, step_label, log)
+                              step_label: str, log: LogFn = None, model: str = PACK_IMAGE_MODEL) -> str:
+    endpoint = pack_endpoint(model, bool(reference_url))
+    return await generate_image(endpoint, prompt, aspect_ratio, reference_url, step_label, log)
 
 
 async def text_to_speech(text: str, voice: str, log: LogFn = None) -> Tuple[str, object]:

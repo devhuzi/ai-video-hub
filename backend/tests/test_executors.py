@@ -49,8 +49,8 @@ async def _insert_pack(pid, n_img, n_vid, system="veo31_frame", **extra):
 def fake_images(monkeypatch):
     calls = []
 
-    async def fake(i, prompt, ref_url, pipeline_id, aspect_ratio="16:9", preferred_service="snapgen"):
-        calls.append((i, ref_url, preferred_service))
+    async def fake(i, prompt, ref_url, pipeline_id, aspect_ratio="16:9", image_model=None, reference_uuid=None):
+        calls.append((i, ref_url, image_model))
         url = f"https://img/{i}"
         await db.update_image(pipeline_id, i, {"status": "completed", "url": url, "service": "fal"})
         return url, "fal", None, None
@@ -63,14 +63,14 @@ def fake_images(monkeypatch):
 def fake_videos(monkeypatch):
     submitted = []
 
-    async def submit(prompt, first, last, aspect):
-        submitted.append((prompt, first, last))
+    async def submit(model, prompt, image_urls, aspect, resolution, duration):
+        submitted.append((prompt, *image_urls))
         return f"uuid-{len(submitted)}"
 
     async def wait_for(gen_uuid, pipeline_id, label, max_wait):
         return {"generated_video": [{"video_url": f"https://vid/{gen_uuid}"}]}
 
-    monkeypatch.setattr(snapgen, "submit_veo_frames", submit)
+    monkeypatch.setattr(snapgen, "submit_video", submit)
     monkeypatch.setattr(snapgen, "wait_for", wait_for)
     return submitted
 
@@ -106,7 +106,7 @@ async def test_cancel_during_snapgen_image_does_not_fall_back(database, monkeypa
     await _insert_pack("p-img", 2, 1)
     kie_calls = []
 
-    async def submit(*a):
+    async def submit(*a, **k):
         return "gg-uuid"
 
     async def wait_for(*a, **k):
@@ -120,7 +120,7 @@ async def test_cancel_during_snapgen_image_does_not_fall_back(database, monkeypa
     monkeypatch.setattr(snapgen, "wait_for", wait_for)
     monkeypatch.setattr(kie, "submit_image", kie_submit)
     with pytest.raises(PipelineCancelled):
-        await images.generate_image_with_fallback(0, "prompt", None, "p-img", preferred_service="snapgen")
+        await images.generate_image_with_fallback(0, "prompt", None, "p-img", image_model="snapgen/nano-banana-2")
     assert kie_calls == []
 
 
@@ -138,7 +138,7 @@ async def test_pause_during_frame_video_retry_stops_paid_retries(database, monke
         ctl.pause.set()  # the user pauses while the first attempt is in flight...
         raise snapgen.SnapGenError("provider hiccup")  # ...and the attempt fails
 
-    monkeypatch.setattr(snapgen, "submit_veo_frames", submit)
+    monkeypatch.setattr(snapgen, "submit_video", submit)
     monkeypatch.setattr(snapgen, "wait_for", wait_for)
     monkeypatch.setattr(asyncio, "sleep", _no_sleep)
     with pytest.raises(PipelinePaused):
@@ -198,7 +198,7 @@ async def test_image_loop_fills_gaps_with_nearest_reference(database, fake_image
     await db.update_image("p-gap", 2, {"status": "completed", "url": "https://img/2"})
     p = await db.find_pipeline("p-gap")
     await pack._generate_images("p-gap", p)
-    assert fake_images == [(1, "https://img/0", "snapgen"), (3, "https://img/2", "snapgen")]
+    assert fake_images == [(1, "https://img/0", "snapgen/nano-banana-2"), (3, "https://img/2", "snapgen/nano-banana-2")]
 
 
 @needs_ffmpeg
@@ -394,7 +394,7 @@ async def test_script_fresh_run_with_logo_and_tts_rescale(database, script_env, 
 
     async def fake_image(model, prompt, aspect_ratio, pipeline_id, step):
         generated.append(prompt)
-        return f"https://img/{len(generated)}"
+        return images.SceneImage(f"https://img/{len(generated)}", "snapgen/grok-image", "snapgen", 4.0)
 
     monkeypatch.setattr(tts, "synthesize", fake_tts)
     monkeypatch.setattr(ss, "split_script_into_scenes", fake_split)
@@ -407,6 +407,7 @@ async def test_script_fresh_run_with_logo_and_tts_rescale(database, script_env, 
     assert generated == ["detailed desc a", "detailed desc b"]
     scenes = await db.find_scenes(pid)
     assert [s["status"] for s in scenes] == ["image_ready", "image_ready"]
+    assert {(s["image_model"], s["image_service"], s["credits"]) for s in scenes} == {("snapgen/grok-image", "snapgen", 4.0)}
     work = config.SCRIPT_STUDIO_DIR / pid
     video = next(s for s in _probe(work / "final.mp4")["streams"] if s["codec_type"] == "video")
     assert (video["width"], video["height"]) == (1080, 1920)

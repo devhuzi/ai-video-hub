@@ -52,7 +52,7 @@ Present the findings, then ask only:
    | Use | When |
    |---|---|
    | `veo31_frame` (frame mode) | Camera mostly locked/static; story told through distinct composed frames; before/after transformations |
-   | `grok_sequential_extend` (extend mode) | Camera travels/follows the subject continuously; POV or journey narrative |
+   | `veo_extend` (extend mode) | Camera travels/follows the subject continuously; POV or journey narrative |
 
 3. **Variations** — approve/add/remove the list of sub-variants (target ~20).
 

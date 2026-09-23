@@ -2,22 +2,23 @@
 import asyncio
 import logging
 import shutil
+import time
 import uuid
 from datetime import datetime, timezone
-from typing import Annotated, Literal, Optional
+from typing import Literal, Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
-from pydantic import BeforeValidator
 
 import database as db
 
 from . import auth, config, uploads, views
 from .integrations import nextcloud, nocodb
-from .models import LoginRequest, PipelineCreate, RegenerateRequest, ScriptPipelineCreate, map_legacy_service
+from .models import (LoginRequest, PipelineCreate, RegenerateRequest, RetryRequest,
+                     ScriptPipelineCreate, VideoModel, VideoSystem)
 from .pipelines import pack, runner
 from .pipelines.common import final_video_path, pack_work_dir, script_work_dir
-from .providers import fal, openrouter, registry, tts
+from .providers import fal, kie, openrouter, registry, snapgen, tts
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +109,7 @@ async def create_pipeline(data: PipelineCreate):
                 f"(paired first/last frame per scene) — got {n_img} images and {n_vid} videos"))
         detected = "veo31_frame"
     else:
-        detected = "grok_sequential_extend"
+        detected = "veo_extend"
     if data.video_system and data.video_system != detected:
         raise HTTPException(status_code=400, detail=(
             f"video_system mismatch — detected '{detected}' from prompt counts, got '{data.video_system}'"))
@@ -118,9 +119,10 @@ async def create_pipeline(data: PipelineCreate):
     row = {
         "id": pipeline_id, "room_type": "direct_prompt", "room_name": data.pipeline_name,
         "pipeline_kind": "paste", "status": "queued", "num_images": n_img, "num_videos": n_vid,
-        "aspect_ratio": data.aspect_ratio, "first_image_model": data.first_image_model,
-        "subsequent_images_model": data.subsequent_images_model, "shot_duration": data.shot_duration,
-        "video_engine": data.video_engine, "video_system": detected, "current_step": "queued", "progress": 0,
+        "aspect_ratio": data.aspect_ratio,
+        "image_model": data.image_model or registry.default_image_model(),
+        "video_model": data.video_model, "video_resolution": data.video_resolution,
+        "video_duration": data.video_duration, "video_system": detected, "current_step": "queued", "progress": 0,
         "resume_from_step": "generating_images", "image_prompts": data.image_prompts,
         "video_prompts": data.video_prompts, "image_urls": [], "video_urls": [],
         "nocodb_synced": False, "created_at": now, "updated_at": now,
@@ -133,7 +135,7 @@ async def create_pipeline(data: PipelineCreate):
     for i, prompt in enumerate(data.video_prompts):
         await db.upsert_video(pipeline_id, i, {"prompt": prompt, "status": "pending", "created_at": now, "updated_at": now})
     await _log(pipeline_id, f"Pipeline created: {data.pipeline_name} ({n_img} images, {n_vid} videos, "
-                            f"{data.aspect_ratio}, {detected})")
+                            f"{data.aspect_ratio}, {detected}, {data.video_model})")
     nocodb.sync_pipeline(pipeline_id, {
         "PipelineKind": "paste", "PipelineName": data.pipeline_name, "Status": "queued",
         "NumImages": n_img, "NumVideos": n_vid, "AspectRatio": data.aspect_ratio, "CreatedAt": now,
@@ -157,8 +159,7 @@ async def create_script_pipeline(data: ScriptPipelineCreate):
     await db.insert_pipeline({
         "id": pipeline_id, "room_type": "script", "room_name": name, "pipeline_kind": "script",
         "status": "queued", "num_images": 0, "num_videos": 0, "aspect_ratio": data.aspect_ratio,
-        "ai_model": ai_model, "first_image_model": registry.scene_model_provider(data.image_gen_model),
-        "subsequent_images_model": registry.scene_model_provider(data.image_gen_model),
+        "ai_model": ai_model,
         "image_gen_model": data.image_gen_model, "current_step": "queued", "progress": 0,
         "resume_from_step": "generating_tts", "image_prompts": [], "video_prompts": [],
         "image_urls": [], "video_urls": [], "nocodb_synced": False, "created_at": now, "updated_at": now,
@@ -203,17 +204,68 @@ async def pause_pipeline(pipeline_id: str):
     return {"message": "Pause requested — pipeline will stop at the next checkpoint", "pipeline_id": pipeline_id}
 
 
+def _is_extend(p: dict) -> bool:
+    return pack.detect_shape(p.get("num_images") or 0, p.get("num_videos") or 0, p.get("video_system")) == "extend"
+
+
+def _video_selection(p: dict, video_model: str, resolution: Optional[str] = None,
+                     duration: Optional[int] = None) -> dict:
+    """Video settings for a new model on an existing pack: the given values, else the
+    pack's current ones when the model accepts them, else the model's defaults.
+    Raises a 422 when the model can't render this pack (aspect ratio, extend)."""
+    current = registry.video_settings({**p, "video_model": video_model})
+    chosen = {"video_model": video_model,
+              "video_resolution": resolution if resolution is not None else current["video_resolution"],
+              "video_duration": duration if duration is not None else current["video_duration"]}
+    problem = registry.video_model_problem(video_model, p.get("aspect_ratio") or "16:9",
+                                           chosen["video_resolution"], chosen["video_duration"],
+                                           extend=_is_extend(p))
+    if problem:
+        raise HTTPException(status_code=422, detail=problem)
+    return chosen
+
+
+def _retry_updates(p: dict, data: RetryRequest) -> dict:
+    """Validated pipeline column updates for the model selections in a retry."""
+    updates: dict = {}
+    if views.pipeline_kind(p) == "script":
+        if data.pack_fields():
+            raise HTTPException(status_code=400, detail="Script Studio runs have no video model settings")
+        if data.image_model:
+            updates["image_gen_model"] = data.image_model
+        updates.update(data.script_fields())
+        return updates
+    if data.script_fields():
+        raise HTTPException(status_code=400, detail="ai_model and tts_voice_id only apply to Script Studio runs")
+    if data.image_model:
+        updates["image_model"] = data.image_model
+    if data.pack_fields():
+        model = data.video_model or registry.video_settings(p)["video_model"]
+        updates.update(_video_selection(p, model, data.video_resolution, data.video_duration))
+    return updates
+
+
 @router.post("/pipelines/{pipeline_id}/retry")
-async def retry_pipeline(pipeline_id: str):
+async def retry_pipeline(pipeline_id: str, data: Optional[RetryRequest] = Body(None)):
+    """Retry / resume. Optional new model selections apply to every item that
+    isn't completed yet; completed items are kept."""
     p = await _get_or_404(pipeline_id)
     if runner.is_active(pipeline_id):
         raise HTTPException(status_code=409, detail="Pipeline is still running or stopping")
-    ok = await db.transition_status(pipeline_id, RETRYABLE,
-                                    {"status": "queued", "current_step": "queued", "error_message": None})
+    updates = _retry_updates(p, data) if data else {}
+    ok = await db.transition_status(pipeline_id, RETRYABLE, {
+        "status": "queued", "current_step": "queued", "error_message": None, **updates})
     if not ok:
         raise HTTPException(status_code=409, detail="Can only retry failed, paused or cancelled pipelines")
+    # A new pack-level model also replaces one-off per-item choices on unfinished items.
+    if "image_model" in updates:
+        await db.clear_item_overrides(pipeline_id, "pipeline_images")
+    if "video_model" in updates:
+        await db.clear_item_overrides(pipeline_id, "pipeline_videos")
     action = "RESUME" if p["status"] == "paused" else "RETRY"
-    await _log(pipeline_id, f"{action}: will resume from step '{p.get('resume_from_step')}'. Queued.")
+    changed = ", ".join(f"{k}={v}" for k, v in updates.items())
+    await _log(pipeline_id, f"{action}: will resume from step '{p.get('resume_from_step')}'"
+                            f"{f' with {changed}' if changed else ''}. Queued.")
     _start(pipeline_id)
     return {"message": f"Pipeline queued to resume from '{p.get('resume_from_step')}'", "pipeline_id": pipeline_id}
 
@@ -255,6 +307,13 @@ async def regenerate_item(pipeline_id: str, data: RegenerateRequest):
     limit = n_img if data.kind == "image" else n_vid
     if data.index >= limit:
         raise HTTPException(status_code=400, detail=f"{data.kind} index out of range (0..{limit - 1})")
+    if data.kind == "image" and data.video_model or data.kind == "video" and data.image_model:
+        raise HTTPException(status_code=400, detail="Pick image_model for an image, video_model for a clip")
+    if data.video_model:
+        if data.index > 0 and _is_extend(p):
+            raise HTTPException(status_code=400, detail=(
+                "In an extend pack later clips inherit clip 1's model — pick a model when regenerating clip 1"))
+        _video_selection(p, data.video_model)  # 422 if it can't render this pack
     if data.kind == "image":
         image_idx = [data.index]
         video_idx = pack.videos_affected_by_image(n_img, n_vid, system, data.index)
@@ -269,8 +328,13 @@ async def regenerate_item(pipeline_id: str, data: RegenerateRequest):
     if not ok:
         raise HTTPException(status_code=409, detail="Pipeline status changed — try again")
     await db.reset_items(pipeline_id, image_idx, video_idx)
+    override = data.image_model or data.video_model
+    if override:
+        update = db.update_image if data.kind == "image" else db.update_video
+        await update(pipeline_id, data.index, {"model_override": override})
     final_video_path(pipeline_id, "pack").unlink(missing_ok=True)
-    await _log(pipeline_id, f"REGENERATE {data.kind} {data.index + 1}: reset images "
+    await _log(pipeline_id, f"REGENERATE {data.kind} {data.index + 1}"
+                            f"{f' with {override}' if override else ''}: reset images "
                             f"{[i + 1 for i in image_idx]} and videos {[i + 1 for i in video_idx]}.")
     _start(pipeline_id)
     return {"message": "Regeneration queued", "pipeline_id": pipeline_id,
@@ -325,21 +389,63 @@ async def get_llm_models():
 
 @router.get("/images/models")
 async def get_image_models():
-    """Script Studio image models: curated fal text-to-image models plus SnapGen and Kie.ai.
+    """Image models for prompt packs and Script Studio, in ladder order: SnapGen,
+    Kie.ai, then the curated fal.ai models.
 
-    `price_usd` is per image from fal's pricing API, or null when fal doesn't report one.
+    `credits` / `credits_label`: SnapGen's listed credits per image (as listed by
+    SnapGen — may change). `price_usd`: fal's per-image price from its pricing
+    API, or null. `default` is Script Studio's default, `pack_default` the
+    prompt-pack default (first configured provider's default model).
     """
+    models = [{"id": f"snapgen/{name}", "name": spec["label"], "provider": "snapgen", "price_usd": None,
+               "credits": spec["credits"], "credits_label": spec["credits_label"],
+               "configured": registry.configured("snapgen")}
+              for name, spec in registry.SNAPGEN_IMAGE_MODELS.items()]
+    models += [{"id": f"kie/{name}", "name": spec["label"], "provider": "kie", "price_usd": None,
+                "credits": None, "credits_label": None, "configured": registry.configured("kie")}
+               for name, spec in registry.KIE_IMAGE_MODELS.items()]
     fal_ids = [m for m, _ in fal.SCENE_IMAGE_MODELS]
     prices = await fal.image_prices(fal_ids)
-    models = [{"id": m, "name": name, "provider": "fal", "price_usd": prices.get(m),
-               "configured": registry.configured("fal")} for m, name in fal.SCENE_IMAGE_MODELS]
-    models += [
-        {"id": "snapgen", "name": "SnapGen · Nano Banana 2", "provider": "snapgen", "price_usd": None,
-         "configured": registry.configured("snapgen")},
-        {"id": "kie", "name": "Kie.ai · Nano Banana 2", "provider": "kie", "price_usd": None,
-         "configured": registry.configured("kie")},
-    ]
-    return {"models": models, "count": len(models), "default": config.DEFAULT_SCENE_IMAGE_MODEL}
+    models += [{"id": m, "name": name, "provider": "fal", "price_usd": prices.get(m), "credits": None,
+                "credits_label": None, "configured": registry.configured("fal")}
+               for m, name in fal.SCENE_IMAGE_MODELS]
+    return {"models": models, "count": len(models), "default": config.DEFAULT_SCENE_IMAGE_MODEL,
+            "pack_default": registry.default_image_model(), "credits_note": registry.CREDITS_NOTE}
+
+
+@router.get("/video/models")
+async def get_video_models():
+    """SnapGen video models with the options each one accepts (the UI renders from this).
+
+    `credits` is SnapGen's published credit cost per clip, or null when unpublished.
+    """
+    models = [{"id": model_id, **spec} for model_id, spec in registry.VIDEO_MODELS.items()]
+    return {"models": models, "count": len(models), "default": registry.DEFAULT_VIDEO_MODEL}
+
+
+_BALANCE_TTL = 60
+_balance_cache: dict = {"at": 0.0, "data": None}
+
+
+async def _balance(provider: str, fetch) -> Optional[float]:
+    if not registry.configured(provider):
+        return None
+    try:
+        return await fetch()
+    except Exception as e:  # a balance is informational; never fail the request over it
+        logger.warning("%s balance lookup failed: %s", registry.LABELS[provider], e)
+        return None
+
+
+@router.get("/balances")
+async def get_balances():
+    """Remaining credits per provider (null when unconfigured or the lookup failed). Cached 60 s."""
+    now = time.monotonic()
+    if _balance_cache["data"] is None or now - _balance_cache["at"] > _BALANCE_TTL:
+        snap, kie_credits = await asyncio.gather(_balance("snapgen", snapgen.balance),
+                                                 _balance("kie", kie.balance))
+        _balance_cache.update(at=now, data={"snapgen": snap, "kie": kie_credits})
+    return _balance_cache["data"]
 
 
 @router.get("/tts/voices")
@@ -370,7 +476,6 @@ async def get_upload(upload_id: str):
 # =============================================================
 
 WORDS_PER_SCENE = 12.5  # ~5 s of narration per scene at ~150 words per minute
-ImageServiceQuery = Annotated[Literal["snapgen", "kie", "fal"], BeforeValidator(map_legacy_service)]
 
 
 def _add(counts: dict, provider: str, kind: str, n: int = 1):
@@ -384,54 +489,72 @@ async def estimate(
     kind: Literal["pack", "script"],
     num_images: int = Query(0, ge=0, le=config.MAX_PROMPTS),
     num_videos: int = Query(0, ge=0, le=config.MAX_PROMPTS),
-    video_system: Optional[Literal["veo31_frame", "grok_sequential_extend"]] = None,
-    video_engine: Literal["grok", "veo"] = "grok",
+    video_system: Optional[VideoSystem] = None,
+    video_model: VideoModel = registry.DEFAULT_VIDEO_MODEL,
+    video_duration: Optional[int] = Query(None, ge=1, le=60),
     image_model: Optional[str] = Query(None, max_length=200),
-    first_image_model: ImageServiceQuery = "snapgen",
-    subsequent_images_model: ImageServiceQuery = "snapgen",
+    first_image_model: Optional[str] = Query(None, max_length=200),  # legacy: a provider name
     aspect_ratio: Literal["16:9", "9:16", "1:1"] = "16:9",
     word_count: int = Query(0, ge=0, le=config.MAX_SCRIPT_CHARS),
 ):
-    """Generation counts per provider, plus a USD figure only for what fal's pricing
-    API prices. SnapGen, Kie.ai and OpenRouter costs are never guessed."""
+    """Generation counts per provider, SnapGen credits as listed by SnapGen, and a USD
+    figure only for what fal's pricing API prices. Kie.ai and OpenRouter costs are
+    never guessed."""
     notes: list = []
     counts: dict = {}
 
     if kind == "pack":
-        services = [first_image_model if i == 0 else subsequent_images_model for i in range(num_images)]
-        for s in registry.IMAGE_SERVICES:
-            _add(counts, s, "images", services.count(s))
+        model = (registry.normalize_image_model(image_model or first_image_model)
+                 or registry.default_image_model())
+        provider = registry.image_model_provider(model)
+        _add(counts, provider, "images", num_images)
         _add(counts, "snapgen", "videos", num_videos)
-        system = video_system or ("grok_sequential_extend" if num_images == 1 else "veo31_frame")
-        engine = "Veo 3.1 first/last frame" if system == "veo31_frame" else f"{video_engine} sequential extend"
+        spec = registry.VIDEO_MODELS[video_model]
+        duration = video_duration if video_duration in spec["durations"] else spec["default_duration"]
+        system = video_system or ("veo_extend" if num_images == 1 else "veo31_frame")
+        how = "first → last frame" if system == "veo31_frame" else "sequential extend"
+        credits = None
         if num_videos:
-            notes.append(f"{num_videos} video(s) via SnapGen ({engine}) — billed in SnapGen credits, not estimated.")
-        for s, label in (("snapgen", "SnapGen"), ("kie", "Kie.ai")):
-            if services.count(s):
-                notes.append(f"{services.count(s)} image(s) via {label} — billed by {label}, not estimated.")
+            credits = num_videos * spec["credits"]
+            notes.append(f"{num_videos} clip(s) via {spec['label']} ({how}): {spec['credits_label']} each "
+                         f"= ≈ {credits} SnapGen credits ({registry.CREDITS_NOTE}).")
+        credits = _add_image_credits(model, num_images, credits, notes)
         # Image 1 has no reference (text-to-image); every later image edits from the previous one.
-        fal_models = [fal.PACK_IMAGE_EDIT_MODEL if i else fal.PACK_IMAGE_MODEL
-                      for i, s in enumerate(services) if s == "fal"]
+        fal_models = ([fal.pack_endpoint(model, i > 0) for i in range(num_images)]
+                      if provider == "fal" else [])
         usd = await _fal_usd(fal_models, notes)
         notes.append("Retries and provider fallbacks are not included.")
         return {"generations": {"images": num_images, "videos": num_videos, "tts": 0},
-                "providers": counts, "estimated_usd": usd, "notes": notes}
+                "providers": counts, "snapgen_credits": credits, "video_seconds": num_videos * duration,
+                "estimated_usd": usd, "notes": notes}
 
     scenes = max(1, round(word_count / WORDS_PER_SCENE)) if word_count else 0
     model = registry.normalize_scene_image_model(image_model)
-    provider = registry.scene_model_provider(model)
+    provider = registry.image_model_provider(model)
     _add(counts, provider, "images", scenes)
     if word_count:
         _add(counts, "openrouter", "llm_calls", 2)
         _add(counts, tts.primary_provider() or "fal", "tts", 1)
     notes.append(f"Scene count is an estimate (~{WORDS_PER_SCENE:g} words per scene); the LLM decides the real split.")
     notes.append("Narration (TTS) and the two OpenRouter LLM calls are not included in the USD figure.")
-    if provider != "fal" and scenes:
-        notes.append(f"{scenes} image(s) via {registry.LABELS[provider]} — billed by {registry.LABELS[provider]}, "
-                     "not estimated.")
+    credits = _add_image_credits(model, scenes, None, notes)
     usd = await _fal_usd([model] * scenes if provider == "fal" else [], notes)
     return {"generations": {"images": scenes, "videos": 0, "tts": 1 if word_count else 0},
-            "providers": counts, "estimated_usd": usd, "notes": notes}
+            "providers": counts, "snapgen_credits": credits, "estimated_usd": usd, "notes": notes}
+
+
+def _add_image_credits(model: str, n: int, credits: Optional[float], notes: list) -> Optional[float]:
+    """Add SnapGen's listed image credits to `credits`; note what isn't estimated."""
+    provider = registry.image_model_provider(model)
+    if not n or provider == "fal":
+        return credits
+    if provider == "kie":
+        notes.append(f"{n} image(s) via Kie.ai — billed by Kie.ai, not estimated.")
+        return credits
+    spec = registry.SNAPGEN_IMAGE_MODELS[registry.image_model_name(model)]
+    notes.append(f"{n} image(s) via SnapGen {spec['label']}: {spec['credits_label']} each "
+                 f"({registry.CREDITS_NOTE}).")
+    return (credits or 0) + n * spec["credits"]
 
 
 async def _fal_usd(models: list, notes: list) -> Optional[float]:

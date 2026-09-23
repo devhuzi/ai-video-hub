@@ -165,14 +165,16 @@ async def execute(pipeline_id: str):
                     runner.checkpoint()
                     await add_log(pipeline_id, f"Generating image for scene {n + 1}/{len(rows)}...")
                     try:
-                        url = await images.generate_scene_image(image_model, r["image_prompt"], aspect_ratio,
-                                                                pipeline_id, f"Scene {n + 1}")
+                        result = await images.generate_scene_image(image_model, r["image_prompt"], aspect_ratio,
+                                                                   pipeline_id, f"Scene {n + 1}")
                     except runner.PipelineInterrupt:
                         raise
                     except Exception as e:
                         raise RuntimeError(f"Scene {n + 1} image failed: {e}") from e
-                    await db.update_scene(pipeline_id, r["index"], {"image_url": url, "status": "image_ready",
-                                                                    "updated_at": db.now_iso()})
+                    url = result.url
+                    await db.update_scene(pipeline_id, r["index"], {
+                        "image_url": url, "status": "image_ready", "image_model": result.model,
+                        "image_service": result.service, "credits": result.credits, "updated_at": db.now_iso()})
                     local.unlink(missing_ok=True)
                 if not local.exists():
                     await download_file(url, local)

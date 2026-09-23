@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "../components/ui/dialog";
+import RetryDialog from "../components/run/RetryDialog";
 import { api, errorMessage } from "../lib/api";
 import { pipelineName } from "../lib/format";
 
@@ -24,6 +25,8 @@ const ACTIONS = {
 };
 
 const NEEDS_CONFIRM = new Set(["cancel", "delete"]);
+// Retry / resume open a dialog that can change the models for the remaining work.
+const PICKS_MODELS = new Set(["retry", "resume"]);
 
 /**
  * Run lifecycle actions with confirmation for cancel/delete and a per-run
@@ -32,14 +35,16 @@ const NEEDS_CONFIRM = new Set(["cancel", "delete"]);
 export function useRunActions({ onChanged, onDeleted } = {}) {
   const [pending, setPending] = useState(null); // { id, action }
   const [confirm, setConfirm] = useState(null); // { action, pipeline }
+  const [retry, setRetry] = useState(null); // { action, pipeline }
 
-  const execute = async (action, pipeline) => {
+  const execute = async (action, pipeline, body) => {
     const def = ACTIONS[action];
     setPending({ id: pipeline.id, action });
     try {
-      await def.call(pipeline.id);
+      await def.call(pipeline.id, body);
       toast.success(def.done);
       setConfirm(null);
+      setRetry(null);
       if (action === "delete") onDeleted?.(pipeline);
       else onChanged?.(pipeline);
     } catch (err) {
@@ -51,6 +56,7 @@ export function useRunActions({ onChanged, onDeleted } = {}) {
 
   const request = (action, pipeline) => {
     if (NEEDS_CONFIRM.has(action)) setConfirm({ action, pipeline });
+    else if (PICKS_MODELS.has(action)) setRetry({ action, pipeline });
     else execute(action, pipeline);
   };
 
@@ -59,28 +65,36 @@ export function useRunActions({ onChanged, onDeleted } = {}) {
 
   const name = confirm ? pipelineName(confirm.pipeline) : "";
   const dialog = (
-    <ConfirmDialog
-      open={!!confirm}
-      onOpenChange={(open) => !open && setConfirm(null)}
-      destructive
-      pending={!!confirm && isPending(confirm.pipeline.id, confirm.action)}
-      title={confirm?.action === "delete" ? "Delete this run?" : "Cancel this run?"}
-      confirmLabel={confirm?.action === "delete" ? "Delete run" : "Cancel run"}
-      description={
-        confirm?.action === "delete" ? (
-          <p>
-            <span className="font-medium text-fg">{name}</span> and all of its generated images, clips and final
-            video will be removed. This can&apos;t be undone.
-          </p>
-        ) : (
-          <p>
-            <span className="font-medium text-fg">{name}</span> stops at the next checkpoint. Assets generated so
-            far are kept and you can retry the run later.
-          </p>
-        )
-      }
-      onConfirm={() => confirm && execute(confirm.action, confirm.pipeline)}
-    />
+    <>
+      <RetryDialog
+        request={retry}
+        pending={!!retry && isPending(retry.pipeline.id, retry.action)}
+        onClose={() => setRetry(null)}
+        onConfirm={(body) => retry && execute(retry.action, retry.pipeline, body)}
+      />
+      <ConfirmDialog
+        open={!!confirm}
+        onOpenChange={(open) => !open && setConfirm(null)}
+        destructive
+        pending={!!confirm && isPending(confirm.pipeline.id, confirm.action)}
+        title={confirm?.action === "delete" ? "Delete this run?" : "Cancel this run?"}
+        confirmLabel={confirm?.action === "delete" ? "Delete run" : "Cancel run"}
+        description={
+          confirm?.action === "delete" ? (
+            <p>
+              <span className="font-medium text-fg">{name}</span> and all of its generated images, clips and final video
+              will be removed. This can&apos;t be undone.
+            </p>
+          ) : (
+            <p>
+              <span className="font-medium text-fg">{name}</span> stops at the next checkpoint. Assets generated so far
+              are kept and you can retry the run later.
+            </p>
+          )
+        }
+        onConfirm={() => confirm && execute(confirm.action, confirm.pipeline)}
+      />
+    </>
   );
 
   return { request, isPending, dialog };

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { Upload, X } from "lucide-react";
@@ -10,13 +10,16 @@ import { Button } from "../components/ui/button";
 import { FieldError, Hint, Input, Label, Textarea } from "../components/ui/field";
 import { SelectField } from "../components/ui/select";
 import { Combobox } from "../components/ui/combobox";
+import Balances from "../components/Balances";
 import { usePipelines } from "../hooks/usePipelines";
+import { useRemoteList } from "../hooks/useRemoteList";
 import { useSetup } from "../hooks/useSetup";
 import { api, errorMessage } from "../lib/api";
 import { formatDuration } from "../lib/format";
 import { formatUsd, providerLabel } from "../lib/providers";
 import { CONTAINER } from "../lib/layout";
 import { ASPECT_OPTIONS, oneOf } from "../lib/options";
+import { CREDITS_NOTE, LADDER_HINT, imageModelOptions } from "../lib/models";
 import { readJson, writeJson } from "../lib/storage";
 import { cn, countWords } from "../lib/utils";
 
@@ -87,28 +90,6 @@ function readSettings() {
     customStyle: typeof saved.customStyle === "string" ? saved.customStyle : "",
     aiModel: typeof saved.aiModel === "string" ? saved.aiModel : DEFAULT_SETTINGS.aiModel,
   };
-}
-
-// Fetch a list endpoint once (and on reload), exposing honest loading/error state.
-function useRemoteList(fetcher) {
-  const [state, setState] = useState({ status: "loading", items: [], defaultId: null, error: null });
-  const [attempt, setAttempt] = useState(0);
-  const fetcherRef = useRef(fetcher);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    setState((s) => ({ ...s, status: "loading", error: null }));
-    fetcherRef
-      .current(controller.signal)
-      .then((result) => setState({ status: "ok", ...result, error: null }))
-      .catch((error) => {
-        if (error?.name !== "AbortError") setState({ status: "error", items: [], defaultId: null, error });
-      });
-    return () => controller.abort();
-  }, [attempt]);
-
-  const reload = useCallback(() => setAttempt((a) => a + 1), []);
-  return { ...state, reload };
 }
 
 function LogoField({ logo, onPick, onClear }) {
@@ -346,16 +327,7 @@ export default function ScriptStudio() {
 
   const imageOptions =
     imageModels.status === "ok"
-      ? imageModels.items.map((m) => {
-          const price = formatUsd(m.price_usd);
-          const usable = imageUsable(m);
-          return {
-            value: modelId(m),
-            label: `${m.name || modelId(m)}${price ? ` · ${price} / image` : ""}`,
-            disabled: !usable,
-            suffix: usable ? null : `add ${setup.envFor(m.provider)}`,
-          };
-        })
+      ? imageModelOptions(imageModels.items, setup)
       : [{ value: settings.imageModel, label: imageModels.status === "loading" ? "Loading models…" : settings.imageModel }];
 
   const llmOptions = llmList.map((m) => ({
@@ -425,7 +397,7 @@ export default function ScriptStudio() {
               }
               hint={
                 imageModels.status === "ok" && !imageBlocked
-                  ? "fal.ai prices come from its pricing API. SnapGen and Kie.ai bill in their own credits."
+                  ? `fal.ai prices come from its pricing API. ${CREDITS_NOTE} ${LADDER_HINT}`
                   : null
               }
             />
@@ -519,6 +491,7 @@ export default function ScriptStudio() {
 
           <PanelSection>
             <Estimate query={estimateQuery} />
+            <Balances />
           </PanelSection>
 
           <PanelSection>

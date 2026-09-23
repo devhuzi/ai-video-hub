@@ -33,7 +33,7 @@ export function frameLabel(video, videoSystem) {
   const a = video.first_frame_index;
   const b = video.last_frame_index;
   if (a == null && b == null) {
-    if (videoSystem === "grok_sequential_extend" && video.index > 0) return `Extends clip ${video.index}`;
+    if (videoSystem === "veo_extend" && video.index > 0) return `Extends clip ${video.index}`;
     return null;
   }
   if (b == null) return `Extends from image ${a + 1}`;

@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { Upload } from "lucide-react";
 import PageHeader from "../components/PageHeader";
 import PromptList from "../components/PromptList";
+import Balances from "../components/Balances";
 import Estimate from "../components/Estimate";
 import SetupBanner, { missingReason } from "../components/SetupBanner";
 import { PanelSection, SettingsPanel } from "../components/SettingsPanel";
@@ -11,53 +12,52 @@ import { Button } from "../components/ui/button";
 import { FieldError, Hint, Input, Label, Textarea } from "../components/ui/field";
 import { SelectField } from "../components/ui/select";
 import { usePipelines } from "../hooks/usePipelines";
+import { useRemoteList } from "../hooks/useRemoteList";
 import { useSetup } from "../hooks/useSetup";
 import { api, errorMessage } from "../lib/api";
 import { formatDuration } from "../lib/format";
-import { IMAGE_PROVIDERS, PROVIDER_LABELS, normalizeProvider } from "../lib/providers";
+import { normalizeProvider } from "../lib/providers";
+import {
+  CREDITS_NOTE, DEFAULT_VIDEO_MODEL, LADDER_HINT, durationOptions, effectiveVideoModel, imageModelOptions,
+  resolutionOptions, snapVideoSettings, usableImageModel, videoModelHint, videoModelOptions,
+} from "../lib/models";
 import {
   SHAPE_INFO, calculateTotalLength, detectMode, framesForVideo, generatePipelineName, parsePromptPack,
 } from "../lib/promptPackParser";
 import { CONTAINER } from "../lib/layout";
-import { ASPECT_OPTIONS, oneOf } from "../lib/options";
+import { ASPECT_LABELS, ASPECT_OPTIONS } from "../lib/options";
 import { readJson, writeJson } from "../lib/storage";
 import { cn } from "../lib/utils";
 
 const SETTINGS_KEY = "aivph.packSettings";
 const DEFAULT_SETTINGS = {
   aspectRatio: "16:9",
-  videoEngine: "grok",
-  shotDuration: 6,
-  firstImageModel: "snapgen",
-  subsequentImagesModel: "snapgen",
+  videoModel: DEFAULT_VIDEO_MODEL,
+  videoResolution: "720p",
+  videoDuration: 8,
+  imageModel: null, // null = the backend's pack default (first configured provider)
 };
 
-const ENGINE_OPTIONS = [
-  { value: "grok", label: "Grok · 720p" },
-  { value: "veo", label: "Veo 3.1 Fast · 1080p" },
-];
-// Frame packs have no engine choice; shown as a locked select for clarity.
-const FRAME_ENGINE_OPTIONS = [{ value: "veo31_frame", label: "Veo 3.1 · first → last frame" }];
-const DURATION_OPTIONS = [6, 10, 15].map((d) => ({ value: String(d), label: `${d} seconds` }));
-
 // Saved settings may come from an older version; drop values that no longer exist.
+// Model values are checked against the catalogues once they load.
 function readSettings() {
   const saved = readJson(SETTINGS_KEY, DEFAULT_SETTINGS);
+  // Older versions saved a provider (firstImageModel / imageProvider); it maps to that provider's default.
+  const legacyProvider = normalizeProvider(saved.imageProvider || saved.firstImageModel, null);
   return {
-    aspectRatio: oneOf(saved.aspectRatio, ASPECT_OPTIONS, DEFAULT_SETTINGS.aspectRatio),
-    videoEngine: oneOf(saved.videoEngine, ENGINE_OPTIONS, DEFAULT_SETTINGS.videoEngine),
-    shotDuration: Number(oneOf(saved.shotDuration, DURATION_OPTIONS, DEFAULT_SETTINGS.shotDuration)),
-    firstImageModel: normalizeProvider(saved.firstImageModel),
-    subsequentImagesModel: normalizeProvider(saved.subsequentImagesModel),
+    aspectRatio: typeof saved.aspectRatio === "string" ? saved.aspectRatio : DEFAULT_SETTINGS.aspectRatio,
+    videoModel: typeof saved.videoModel === "string" ? saved.videoModel : DEFAULT_SETTINGS.videoModel,
+    videoResolution: typeof saved.videoResolution === "string" ? saved.videoResolution : DEFAULT_SETTINGS.videoResolution,
+    videoDuration: Number(saved.videoDuration) || DEFAULT_SETTINGS.videoDuration,
+    imageModel:
+      typeof saved.imageModel === "string"
+        ? saved.imageModel
+        : legacyProvider === "fal"
+          ? "fal-ai/nano-banana-2"
+          : legacyProvider
+            ? `${legacyProvider}/nano-banana-2`
+            : null,
   };
-}
-
-// Unconfigured providers stay visible but disabled, with the env var to add.
-function providerOptions(setup) {
-  return IMAGE_PROVIDERS.map((p) => {
-    const ok = setup.configured(p);
-    return { value: p, label: PROVIDER_LABELS[p], disabled: !ok, suffix: ok ? null : `add ${setup.envFor(p)}` };
-  });
 }
 
 const ACCEPTED_EXT = [".txt", ".md", ".json"];
@@ -78,6 +78,8 @@ export default function NewPack() {
   const [settings, setSettings] = useState(readSettings);
   const [name, setName] = useState("");
   const [launching, setLaunching] = useState(false);
+  const videoModels = useRemoteList(api.getVideoModels);
+  const imageModels = useRemoteList(api.getImageModels);
 
   useEffect(() => writeJson(SETTINGS_KEY, settings), [settings]);
   const set = (key) => (value) => setSettings((s) => ({ ...s, [key]: value }));
@@ -103,8 +105,23 @@ export default function NewPack() {
   const mode = packError ? null : detection?.mode;
   const shape = packError ? null : detection?.shape;
   const isExtend = mode === "extend";
-  const clipSeconds = isExtend ? (settings.videoEngine === "veo" ? 8 : settings.shotDuration) : 8;
-  const totalSeconds = mode ? calculateTotalLength(mode, videos.length, settings.videoEngine, settings.shotDuration) : 0;
+
+  // Video options come from the backend catalogue; only values the model accepts are offered.
+  const catalog = videoModels.status === "ok" ? videoModels.items : [];
+  const videoModel = catalog.length
+    ? effectiveVideoModel(catalog, videoModels.defaultId, settings.videoModel, { isExtend })
+    : null;
+  useEffect(() => {
+    if (videoModel) setSettings((s) => snapVideoSettings(s, videoModel));
+  }, [videoModel]);
+  // Image model: the saved choice while its provider is configured, else the backend's pack default.
+  const imageCatalog = imageModels.status === "ok" ? imageModels.items : [];
+  const imageModel = imageCatalog.length
+    ? usableImageModel(imageCatalog, settings.imageModel, imageModels.packDefaultId)
+    : settings.imageModel;
+
+  const clipSeconds = Number(settings.videoDuration);
+  const totalSeconds = mode ? calculateTotalLength(mode, videos.length, clipSeconds) : 0;
 
   const firstImage = images[0] || "";
   const autoName = useMemo(() => (firstImage ? generatePipelineName([firstImage]) : ""), [firstImage]);
@@ -150,25 +167,24 @@ export default function NewPack() {
   };
 
   const canLaunch = !!mode && !!finalName && !launching && packFeature.ready;
-  const usesVeo = mode === "frame" || (isExtend && settings.videoEngine === "veo");
-  const unconfiguredSlots = [
-    ["the first image uses", settings.firstImageModel],
-    ...(images.length > 1 ? [["the other images use", settings.subsequentImagesModel]] : []),
-  ].filter(([, p]) => !setup.configured(p));
-  const modelsHint = unconfiguredSlots.length
-    ? unconfiguredSlots
-        .map(([slot, p]) => `${PROVIDER_LABELS[p]} isn't configured (add ${setup.envFor(p)}), so ${slot} the next configured provider.`)
-        .join(" ")
-    : "If a provider fails, images fall back in this order: SnapGen, Kie.ai, fal.ai.";
-  const aspectHint =
-    settings.aspectRatio === "9:16" && usesVeo
-      ? `Veo 3.1 is documented as 16:9 only, so portrait may be rejected.${isExtend ? " Grok supports portrait." : ""}`
-      : null;
-  let engineHint = null;
-  if (mode === "frame") engineHint = "Frame packs always use Veo 3.1, 8 seconds per clip.";
-  else if (!mode) engineHint = "Used by extend packs (one image). Frame packs always use Veo 3.1.";
-  else if (settings.videoEngine === "veo") engineHint = "Veo clips are 8 seconds each.";
-  const providers = providerOptions(setup);
+  const hasResolution = !!videoModel?.resolutions.length;
+  const videoPayload = {
+    video_model: videoModel?.id || settings.videoModel,
+    video_resolution: videoModel && !hasResolution ? undefined : settings.videoResolution,
+    video_duration: clipSeconds,
+  };
+
+  const videoOptions = catalog.length
+    ? videoModelOptions(catalog, { isExtend })
+    : [{ value: settings.videoModel, label: videoModels.status === "loading" ? "Loading models…" : settings.videoModel }];
+  const imageOptions = imageCatalog.length
+    ? imageModelOptions(imageCatalog, setup)
+    : [{ value: imageModel || "", label: imageModels.status === "loading" ? "Loading models…" : imageModel || "Default" }];
+  const aspectOptions = videoModel
+    ? videoModel.aspects.map((a) => ({ value: a, label: ASPECT_LABELS[a] || a }))
+    : ASPECT_OPTIONS;
+  const resolutionChoices = resolutionOptions(videoModel);
+  const durationChoices = durationOptions(videoModel, clipSeconds);
 
   const launch = async () => {
     if (!canLaunch) return;
@@ -180,10 +196,8 @@ export default function NewPack() {
         video_prompts: videos.map((p) => p.trim()),
         video_system: detection.videoSystem,
         aspect_ratio: settings.aspectRatio,
-        first_image_model: settings.firstImageModel,
-        subsequent_images_model: settings.subsequentImagesModel,
-        shot_duration: isExtend ? settings.shotDuration : 6,
-        video_engine: isExtend ? settings.videoEngine : "grok",
+        image_model: imageModel || undefined,
+        ...videoPayload,
       });
       toast.success("Run started.");
       refreshQueue();
@@ -200,9 +214,9 @@ export default function NewPack() {
         num_images: images.length,
         num_videos: videos.length,
         video_system: detection.videoSystem,
-        first_image_model: settings.firstImageModel,
-        subsequent_images_model: images.length > 1 ? settings.subsequentImagesModel : settings.firstImageModel,
-        video_engine: isExtend ? settings.videoEngine : undefined,
+        image_model: imageModel || undefined,
+        video_model: videoPayload.video_model,
+        video_duration: videoPayload.video_duration,
         aspect_ratio: settings.aspectRatio,
       }
     : null;
@@ -317,56 +331,68 @@ export default function NewPack() {
             )}
           </PanelSection>
 
-          <PanelSection title="Output">
+          <PanelSection title="Video">
+            <SelectField
+              id="video-model"
+              label="Video model"
+              labelHint="SnapGen"
+              value={videoModel?.id || settings.videoModel}
+              onChange={set("videoModel")}
+              options={videoOptions}
+              disabled={!catalog.length}
+              error={
+                videoModels.status === "error"
+                  ? `Couldn't load video models: ${errorMessage(videoModels.error)}. The last selection will be used.`
+                  : null
+              }
+              hint={videoModelHint(videoModel, mode)}
+            />
+            {hasResolution && (
+              <SelectField
+                id="video-resolution"
+                label="Resolution"
+                value={settings.videoResolution}
+                onChange={set("videoResolution")}
+                options={resolutionChoices}
+              />
+            )}
+            <SelectField
+              id="video-duration"
+              label="Clip length"
+              value={String(clipSeconds)}
+              onChange={(v) => set("videoDuration")(Number(v))}
+              options={durationChoices}
+              disabled={durationChoices.length < 2}
+            />
             <SelectField
               id="aspect-ratio"
               label="Aspect ratio"
               value={settings.aspectRatio}
               onChange={set("aspectRatio")}
-              options={ASPECT_OPTIONS}
-              hint={aspectHint}
+              options={aspectOptions}
             />
-            <SelectField
-              id="video-engine"
-              label="Video engine"
-              value={mode === "frame" ? FRAME_ENGINE_OPTIONS[0].value : settings.videoEngine}
-              onChange={set("videoEngine")}
-              options={mode === "frame" ? FRAME_ENGINE_OPTIONS : ENGINE_OPTIONS}
-              disabled={mode === "frame"}
-              hint={engineHint}
-            />
-            {isExtend && settings.videoEngine === "grok" && (
-              <SelectField
-                id="shot-duration"
-                label="Clip length"
-                value={String(settings.shotDuration)}
-                onChange={(v) => set("shotDuration")(Number(v))}
-                options={DURATION_OPTIONS}
-              />
-            )}
           </PanelSection>
 
-          <PanelSection title="Models">
+          <PanelSection title="Images">
             <SelectField
-              id="first-image-model"
-              label="First image"
-              value={settings.firstImageModel}
-              onChange={set("firstImageModel")}
-              options={providers}
-            />
-            <SelectField
-              id="subsequent-image-model"
-              label="Other images"
-              value={settings.subsequentImagesModel}
-              onChange={set("subsequentImagesModel")}
-              options={providers}
-              disabled={images.length === 1}
-              hint={modelsHint}
+              id="image-model"
+              label="Image model"
+              value={imageModel || ""}
+              onChange={set("imageModel")}
+              options={imageOptions}
+              disabled={!imageCatalog.length}
+              error={
+                imageModels.status === "error"
+                  ? `Couldn't load image models: ${errorMessage(imageModels.error)}. The server default will be used.`
+                  : null
+              }
+              hint={`${LADDER_HINT} ${CREDITS_NOTE}`}
             />
           </PanelSection>
 
           <PanelSection>
             <Estimate query={estimateQuery} />
+            <Balances />
           </PanelSection>
 
           <PanelSection>

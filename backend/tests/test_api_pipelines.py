@@ -44,7 +44,8 @@ def test_create_pack_returns_arrays_and_starts_run(authed, started):
 
 def test_extend_shape_detected(authed):
     body = _create_pack(authed, image_prompts=["hero"], video_prompts=["a", "b", "c"])
-    assert body["video_system"] == "grok_sequential_extend"
+    assert body["video_system"] == "veo_extend"
+    assert body["video_model"] == "veo-3.1-fast"
     assert body["videos"][0]["first_frame_index"] == 0
     assert body["videos"][1]["first_frame_index"] is None
 
@@ -77,9 +78,9 @@ def test_detail_404(authed):
     {**PACK_4_3, "image_prompts": ["x" * 8001, "b", "c", "d"]},
     {**PACK_4_3, "image_prompts": ["   ", "b", "c", "d"]},
     {**PACK_4_3, "aspect_ratio": "4:3"},
-    {**PACK_4_3, "shot_duration": 99},
     {**PACK_4_3, "video_system": "sora"},
-    {**PACK_4_3, "video_engine": "sora"},
+    {**PACK_4_3, "video_model": "sora"},
+    {**PACK_4_3, "image_model": "midjourney"},
     {**PACK_4_3, "first_image_model": "midjourney"},
     {k: v for k, v in PACK_4_3.items() if k != "pipeline_name"},
 ])
