@@ -20,6 +20,13 @@ export function normalizeProvider(value, fallback = "snapgen") {
   return IMAGE_PROVIDERS.includes(v) ? v : fallback;
 }
 
+// Display name for a provider id, including ids saved by older backends.
+export function providerLabel(value) {
+  if (!value) return null;
+  const v = LEGACY[value] || value;
+  return PROVIDER_LABELS[v] || value;
+}
+
 export function formatUsd(n) {
   if (typeof n !== "number" || !Number.isFinite(n)) return null;
   if (n === 0) return "$0";

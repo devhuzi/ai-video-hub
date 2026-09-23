@@ -18,6 +18,8 @@ import {
   KIND_LABEL, absoluteTime, clampProgress, formatDuration, humanize, isActive, pipelineKind, pipelineName,
   relativeTime, runDuration,
 } from "../lib/format";
+import { CONTAINER } from "../lib/layout";
+import { cn } from "../lib/utils";
 
 const ACTIVE_INTERVAL = 2500;
 const ERROR_INTERVAL = 5000;
@@ -96,7 +98,7 @@ export default function RunDetail() {
       );
     }
     return (
-      <div className="space-y-4 px-4 py-5 md:px-6" aria-busy="true" aria-label="Loading run">
+      <div className={cn(CONTAINER.editor, "space-y-4 py-5")} aria-busy="true" aria-label="Loading run">
         <Skeleton className="h-5 w-64" />
         <Skeleton className="h-4 w-40" />
         <Skeleton className="aspect-video w-full max-w-2xl" />
@@ -117,7 +119,7 @@ export default function RunDetail() {
 
   return (
     <>
-      <div className="px-4 pt-3 md:px-6">
+      <div className={cn(CONTAINER.editor, "pt-3")}>
         <BackLink />
       </div>
       <PageHeader
@@ -170,12 +172,14 @@ export default function RunDetail() {
       </PageHeader>
 
       {error && (
-        <div role="status" className="border-b border-line bg-surface px-4 py-2 text-sm text-status-failed md:px-6">
-          Last refresh failed: {errorMessage(error)}. Retrying automatically.
+        <div role="status" className="border-b border-line bg-surface">
+          <p className={cn(CONTAINER.editor, "py-2 text-sm text-status-failed")}>
+            Last refresh failed: {errorMessage(error)}. Retrying automatically.
+          </p>
         </div>
       )}
 
-      <div className="grid gap-6 px-4 py-5 md:px-6 lg:grid-cols-[minmax(0,1fr)_280px]">
+      <div className={cn(CONTAINER.editor, "grid gap-6 py-5 lg:grid-cols-[minmax(0,1fr)_280px]")}>
         <div className="min-w-0 space-y-6">
           {p.final_video_url && <FinalVideo url={p.final_video_url} name={name} aspectRatio={p.aspect_ratio} />}
 

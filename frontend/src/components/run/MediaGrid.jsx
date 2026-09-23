@@ -7,7 +7,7 @@ import { ConfirmDialog, Lightbox } from "../ui/dialog";
 import { api, errorMessage, mediaSrc } from "../../lib/api";
 import { cn } from "../../lib/utils";
 import { ASPECT_CLASS, GRID_CLASS, frameLabel } from "./media";
-import { PROVIDER_LABELS } from "../../lib/providers";
+import { providerLabel } from "../../lib/providers";
 
 function MediaCard({ item, kind, aspectRatio, videoSystem, canRegenerate, onRegenerate, onExpand }) {
   const src = mediaSrc(item.url);
@@ -57,7 +57,7 @@ function MediaCard({ item, kind, aspectRatio, videoSystem, canRegenerate, onRege
         {(frames || item.service) && (
           <p className="flex flex-wrap gap-x-3 text-xs text-fg-muted">
             {frames && <span>{frames}</span>}
-            {item.service && <span>{PROVIDER_LABELS[item.service] || item.service}</span>}
+            {item.service && <span>{providerLabel(item.service)}</span>}
           </p>
         )}
         {failed && item.error && <p className="break-words text-xs text-status-failed">{item.error}</p>}

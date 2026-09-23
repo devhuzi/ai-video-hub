@@ -1,13 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
-import { ChevronDown, ChevronRight, Upload } from "lucide-react";
+import { Upload } from "lucide-react";
 import PageHeader from "../components/PageHeader";
 import PromptList from "../components/PromptList";
 import Estimate from "../components/Estimate";
 import SetupBanner, { missingReason } from "../components/SetupBanner";
+import { PanelSection, SettingsPanel } from "../components/SettingsPanel";
 import { Button } from "../components/ui/button";
-import { FieldError, Hint, Input, Label, Segmented, Select, Textarea } from "../components/ui/field";
+import { FieldError, Hint, Input, Label, Textarea } from "../components/ui/field";
+import { SelectField } from "../components/ui/select";
 import { usePipelines } from "../hooks/usePipelines";
 import { useSetup } from "../hooks/useSetup";
 import { api, errorMessage } from "../lib/api";
@@ -16,6 +18,8 @@ import { IMAGE_PROVIDERS, PROVIDER_LABELS, normalizeProvider } from "../lib/prov
 import {
   SHAPE_INFO, calculateTotalLength, detectMode, framesForVideo, generatePipelineName, parsePromptPack,
 } from "../lib/promptPackParser";
+import { CONTAINER } from "../lib/layout";
+import { ASPECT_OPTIONS, oneOf } from "../lib/options";
 import { readJson, writeJson } from "../lib/storage";
 import { cn } from "../lib/utils";
 
@@ -28,30 +32,32 @@ const DEFAULT_SETTINGS = {
   subsequentImagesModel: "snapgen",
 };
 
+const ENGINE_OPTIONS = [
+  { value: "grok", label: "Grok · 720p" },
+  { value: "veo", label: "Veo 3.1 Fast · 1080p" },
+];
+// Frame packs have no engine choice; shown as a locked select for clarity.
+const FRAME_ENGINE_OPTIONS = [{ value: "veo31_frame", label: "Veo 3.1 · first → last frame" }];
+const DURATION_OPTIONS = [6, 10, 15].map((d) => ({ value: String(d), label: `${d} seconds` }));
+
+// Saved settings may come from an older version; drop values that no longer exist.
 function readSettings() {
   const saved = readJson(SETTINGS_KEY, DEFAULT_SETTINGS);
   return {
-    ...saved,
+    aspectRatio: oneOf(saved.aspectRatio, ASPECT_OPTIONS, DEFAULT_SETTINGS.aspectRatio),
+    videoEngine: oneOf(saved.videoEngine, ENGINE_OPTIONS, DEFAULT_SETTINGS.videoEngine),
+    shotDuration: Number(oneOf(saved.shotDuration, DURATION_OPTIONS, DEFAULT_SETTINGS.shotDuration)),
     firstImageModel: normalizeProvider(saved.firstImageModel),
     subsequentImagesModel: normalizeProvider(saved.subsequentImagesModel),
   };
 }
 
-// One <select> of image providers; unconfigured ones stay visible but disabled.
-function ProviderSelect({ id, value, onChange, disabled, setup }) {
-  return (
-    <Select id={id} value={value} onChange={(e) => onChange(e.target.value)} disabled={disabled}>
-      {IMAGE_PROVIDERS.map((p) => {
-        const ok = setup.configured(p);
-        return (
-          <option key={p} value={p} disabled={!ok}>
-            {PROVIDER_LABELS[p]}
-            {ok ? "" : ` — add ${setup.envFor(p)} to enable`}
-          </option>
-        );
-      })}
-    </Select>
-  );
+// Unconfigured providers stay visible but disabled, with the env var to add.
+function providerOptions(setup) {
+  return IMAGE_PROVIDERS.map((p) => {
+    const ok = setup.configured(p);
+    return { value: p, label: PROVIDER_LABELS[p], disabled: !ok, suffix: ok ? null : `add ${setup.envFor(p)}` };
+  });
 }
 
 const ACCEPTED_EXT = [".txt", ".md", ".json"];
@@ -71,7 +77,6 @@ export default function NewPack() {
   const [dragging, setDragging] = useState(false);
   const [settings, setSettings] = useState(readSettings);
   const [name, setName] = useState("");
-  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [launching, setLaunching] = useState(false);
 
   useEffect(() => writeJson(SETTINGS_KEY, settings), [settings]);
@@ -147,9 +152,23 @@ export default function NewPack() {
   const canLaunch = !!mode && !!finalName && !launching && packFeature.ready;
   const usesVeo = mode === "frame" || (isExtend && settings.videoEngine === "veo");
   const unconfiguredSlots = [
-    ["first", settings.firstImageModel],
-    ...(images.length > 1 ? [["other", settings.subsequentImagesModel]] : []),
+    ["the first image uses", settings.firstImageModel],
+    ...(images.length > 1 ? [["the other images use", settings.subsequentImagesModel]] : []),
   ].filter(([, p]) => !setup.configured(p));
+  const modelsHint = unconfiguredSlots.length
+    ? unconfiguredSlots
+        .map(([slot, p]) => `${PROVIDER_LABELS[p]} isn't configured (add ${setup.envFor(p)}), so ${slot} the next configured provider.`)
+        .join(" ")
+    : "If a provider fails, images fall back in this order: SnapGen, Kie.ai, fal.ai.";
+  const aspectHint =
+    settings.aspectRatio === "9:16" && usesVeo
+      ? `Veo 3.1 is documented as 16:9 only, so portrait may be rejected.${isExtend ? " Grok supports portrait." : ""}`
+      : null;
+  let engineHint = null;
+  if (mode === "frame") engineHint = "Frame packs always use Veo 3.1, 8 seconds per clip.";
+  else if (!mode) engineHint = "Used by extend packs (one image). Frame packs always use Veo 3.1.";
+  else if (settings.videoEngine === "veo") engineHint = "Veo clips are 8 seconds each.";
+  const providers = providerOptions(setup);
 
   const launch = async () => {
     if (!canLaunch) return;
@@ -191,8 +210,8 @@ export default function NewPack() {
   return (
     <>
       <PageHeader title="New prompt pack" meta="Paste or drop image and video prompts. The pipeline shape is detected from the counts." />
-      <SetupBanner feature={packFeature} title="Prompt packs" />
-      <div className="grid gap-6 px-4 py-5 md:px-6 lg:grid-cols-[minmax(0,1fr)_340px]">
+      <SetupBanner feature={packFeature} lead="prompt packs need" />
+      <div className={cn(CONTAINER.editor, "grid gap-6 py-5 lg:grid-cols-[minmax(0,1fr)_340px]")}>
         {/* Left: source + parsed rows */}
         <div className="min-w-0 space-y-6">
           <div>
@@ -268,14 +287,11 @@ export default function NewPack() {
         </div>
 
         {/* Right: settings + launch */}
-        <aside className="self-start space-y-5 rounded border border-line bg-surface p-4 lg:sticky lg:top-4">
-          <section aria-labelledby="shape-heading">
-            <h2 id="shape-heading" className="text-sm font-medium text-fg">
-              Pipeline shape
-            </h2>
+        <SettingsPanel label="Run settings">
+          <PanelSection title="Pipeline shape">
             {shape ? (
-              <>
-                <p className="mt-1 text-base text-fg">{SHAPE_INFO[shape].label}</p>
+              <div>
+                <p className="text-base text-fg">{SHAPE_INFO[shape].label}</p>
                 <p className="mt-1 text-sm text-fg-secondary">{SHAPE_INFO[shape].description}</p>
                 <dl className="mt-3 grid grid-cols-3 gap-2 text-sm">
                   <div>
@@ -293,141 +309,84 @@ export default function NewPack() {
                     </dd>
                   </div>
                 </dl>
-              </>
+              </div>
             ) : (
-              <p className="mt-1 text-sm text-fg-muted">
+              <p className="text-sm text-fg-muted">
                 {source.trim() ? "Fix the pack to see its shape." : "Paste a pack to detect its shape."}
               </p>
             )}
-          </section>
+          </PanelSection>
 
-          <Segmented
-            name="aspect"
-            legend="Aspect ratio"
-            value={settings.aspectRatio}
-            onChange={set("aspectRatio")}
-            options={[
-              { value: "16:9", label: "16:9" },
-              { value: "9:16", label: "9:16" },
-            ]}
-          />
-          {settings.aspectRatio === "9:16" && usesVeo && (
-            <Hint className="-mt-3 text-fg-secondary">
-              Veo 3.1 is documented as 16:9 only; portrait may be rejected.
-              {isExtend ? " Grok supports portrait." : ""}
-            </Hint>
-          )}
-
-          {isExtend ? (
-            <>
-              <Segmented
-                name="engine"
-                legend="Video engine"
-                value={settings.videoEngine}
-                onChange={set("videoEngine")}
-                options={[
-                  { value: "grok", label: "Grok", detail: "720p" },
-                  { value: "veo", label: "Veo 3.1 Fast", detail: "1080p" },
-                ]}
+          <PanelSection title="Output">
+            <SelectField
+              id="aspect-ratio"
+              label="Aspect ratio"
+              value={settings.aspectRatio}
+              onChange={set("aspectRatio")}
+              options={ASPECT_OPTIONS}
+              hint={aspectHint}
+            />
+            <SelectField
+              id="video-engine"
+              label="Video engine"
+              value={mode === "frame" ? FRAME_ENGINE_OPTIONS[0].value : settings.videoEngine}
+              onChange={set("videoEngine")}
+              options={mode === "frame" ? FRAME_ENGINE_OPTIONS : ENGINE_OPTIONS}
+              disabled={mode === "frame"}
+              hint={engineHint}
+            />
+            {isExtend && settings.videoEngine === "grok" && (
+              <SelectField
+                id="shot-duration"
+                label="Clip length"
+                value={String(settings.shotDuration)}
+                onChange={(v) => set("shotDuration")(Number(v))}
+                options={DURATION_OPTIONS}
               />
-              {settings.videoEngine === "grok" ? (
-                <Segmented
-                  name="shot"
-                  legend="Clip length"
-                  value={String(settings.shotDuration)}
-                  onChange={(v) => set("shotDuration")(Number(v))}
-                  options={[6, 10, 15].map((d) => ({ value: String(d), label: `${d}s` }))}
-                />
-              ) : (
-                <Hint className="mt-0">Veo clips are 8 seconds each.</Hint>
-              )}
-            </>
-          ) : (
-            mode === "frame" && (
-              <div>
-                <p className="text-sm font-medium text-fg">Video engine</p>
-                <p className="mt-0.5 text-sm text-fg-secondary">Veo 3.1, first → last frame, 8s per clip</p>
-              </div>
-            )
-          )}
-
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <Label htmlFor="first-image-model">First image</Label>
-              <ProviderSelect
-                id="first-image-model"
-                value={settings.firstImageModel}
-                onChange={set("firstImageModel")}
-                setup={setup}
-              />
-            </div>
-            <div>
-              <Label htmlFor="subsequent-image-model">Other images</Label>
-              <ProviderSelect
-                id="subsequent-image-model"
-                value={settings.subsequentImagesModel}
-                onChange={set("subsequentImagesModel")}
-                disabled={images.length === 1}
-                setup={setup}
-              />
-            </div>
-          </div>
-          {unconfiguredSlots.length > 0 ? (
-            <Hint className="-mt-3">
-              {unconfiguredSlots
-                .map(([slot, p]) => `${PROVIDER_LABELS[p]} (${slot} image) isn't configured — add ${setup.envFor(p)}`)
-                .join("; ")}
-              . Those images fall back to the next configured provider.
-            </Hint>
-          ) : (
-            <Hint className="-mt-3">If a provider fails, images fall back SnapGen → Kie.ai → fal.ai.</Hint>
-          )}
-
-          <div className="border-t border-line pt-4">
-            <button
-              type="button"
-              aria-expanded={advancedOpen}
-              aria-controls="pack-advanced"
-              onClick={() => setAdvancedOpen((o) => !o)}
-              className="flex items-center gap-1.5 text-sm font-medium text-fg-secondary hover:text-fg"
-            >
-              {advancedOpen ? (
-                <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
-              ) : (
-                <ChevronRight className="h-3.5 w-3.5" aria-hidden="true" />
-              )}
-              Advanced
-            </button>
-            {advancedOpen && (
-              <div id="pack-advanced" className="mt-3">
-                <Label htmlFor="run-name">Run name</Label>
-                <Input
-                  id="run-name"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  placeholder={autoName || "Generated from the first image prompt"}
-                  aria-describedby="run-name-hint"
-                />
-                <Hint id="run-name-hint">Leave empty to use the generated name.</Hint>
-              </div>
             )}
-          </div>
+          </PanelSection>
 
-          <div className="border-t border-line pt-4">
+          <PanelSection title="Models">
+            <SelectField
+              id="first-image-model"
+              label="First image"
+              value={settings.firstImageModel}
+              onChange={set("firstImageModel")}
+              options={providers}
+            />
+            <SelectField
+              id="subsequent-image-model"
+              label="Other images"
+              value={settings.subsequentImagesModel}
+              onChange={set("subsequentImagesModel")}
+              options={providers}
+              disabled={images.length === 1}
+              hint={modelsHint}
+            />
+          </PanelSection>
+
+          <PanelSection>
             <Estimate query={estimateQuery} />
-          </div>
+          </PanelSection>
 
-          <div className="border-t border-line pt-4">
+          <PanelSection>
+            <div>
+              <Label htmlFor="run-name" hint="Optional">
+                Run name
+              </Label>
+              <Input
+                id="run-name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder={autoName || "Generated from the first image prompt"}
+              />
+            </div>
             <Button variant="primary" size="lg" className="w-full justify-center" disabled={!canLaunch} pending={launching} onClick={launch}>
               Launch run
             </Button>
-            {notReadyReason ? (
-              <Hint>Launch is disabled: {notReadyReason}</Hint>
-            ) : (
-              finalName && mode && <p className="mt-2 truncate text-xs text-fg-muted" title={finalName}>{finalName}</p>
-            )}
-          </div>
-        </aside>
+            {notReadyReason && <Hint className="mt-0">{notReadyReason}</Hint>}
+          </PanelSection>
+        </SettingsPanel>
       </div>
     </>
   );

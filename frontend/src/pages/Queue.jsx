@@ -12,6 +12,7 @@ import {
   KIND_LABEL, absoluteTime, clampProgress, formatDuration, humanize, isActive,
   pipelineKind, pipelineName, relativeTime, runDuration,
 } from "../lib/format";
+import { CONTAINER } from "../lib/layout";
 import { cn } from "../lib/utils";
 
 const FILTERS = [
@@ -211,6 +212,7 @@ export default function Queue() {
     <>
       <PageHeader
         title="Queue"
+        width="wide"
         actions={
           <Link to="/new" className={buttonClasses({ variant: "primary" })}>
             <Plus className="h-4 w-4" aria-hidden="true" />
@@ -240,12 +242,15 @@ export default function Queue() {
       </PageHeader>
 
       {error && data && (
-        <div role="status" className="border-b border-line bg-surface px-4 py-2 text-sm text-status-failed md:px-6">
-          Last refresh failed: {errorMessage(error)}. Retrying automatically.
+        <div role="status" className="border-b border-line bg-surface">
+          <p className={cn(CONTAINER.wide, "py-2 text-sm text-status-failed")}>
+            Last refresh failed: {errorMessage(error)}. Retrying automatically.
+          </p>
         </div>
       )}
 
-      {body}
+      {/* Rows carry their own padding so the hover background spans the full row. */}
+      <div className="mx-auto w-full max-w-[1440px]">{body}</div>
       {actions.dialog}
     </>
   );

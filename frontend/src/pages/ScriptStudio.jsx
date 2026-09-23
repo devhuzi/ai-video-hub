@@ -1,17 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
-import { ChevronDown, ChevronRight, Upload, X } from "lucide-react";
+import { Upload, X } from "lucide-react";
 import PageHeader from "../components/PageHeader";
 import Estimate from "../components/Estimate";
 import SetupBanner, { missingReason } from "../components/SetupBanner";
+import { PanelSection, SettingsPanel } from "../components/SettingsPanel";
 import { Button } from "../components/ui/button";
-import { FieldError, Hint, Input, Label, Segmented, Select, Textarea } from "../components/ui/field";
+import { FieldError, Hint, Input, Label, Textarea } from "../components/ui/field";
+import { SelectField } from "../components/ui/select";
+import { Combobox } from "../components/ui/combobox";
 import { usePipelines } from "../hooks/usePipelines";
 import { useSetup } from "../hooks/useSetup";
 import { api, errorMessage } from "../lib/api";
 import { formatDuration } from "../lib/format";
-import { PROVIDER_LABELS, formatUsd } from "../lib/providers";
+import { formatUsd, providerLabel } from "../lib/providers";
+import { CONTAINER } from "../lib/layout";
+import { ASPECT_OPTIONS, oneOf } from "../lib/options";
 import { readJson, writeJson } from "../lib/storage";
 import { cn, countWords } from "../lib/utils";
 
@@ -55,11 +60,33 @@ const voiceName = (v) => v.name || voiceId(v);
 const modelId = (m) => m.id || m.model || "";
 const imageUsable = (m) => m.configured !== false;
 
+const STYLE_OPTIONS = STYLE_PRESETS.map((p) => ({ value: p.id, label: p.label }));
+
 // OpenRouter prices are USD per million tokens (input / output).
 function llmPrice(model) {
   const inp = formatUsd(model?.prompt_price);
   const out = formatUsd(model?.completion_price);
   return inp && out ? `${inp} in / ${out} out per 1M tokens` : null;
+}
+
+// Compact price for the model list: "$3.00 / $15.00", or "Free".
+function llmPriceShort(model) {
+  if (model?.prompt_price === 0 && model?.completion_price === 0) return "Free";
+  const inp = formatUsd(model?.prompt_price);
+  const out = formatUsd(model?.completion_price);
+  return inp && out ? `${inp} / ${out}` : null;
+}
+
+// Saved settings may come from an older version; drop values that no longer exist.
+function readSettings() {
+  const saved = readJson(SETTINGS_KEY, DEFAULT_SETTINGS);
+  return {
+    ...saved,
+    aspectRatio: oneOf(saved.aspectRatio, ASPECT_OPTIONS, DEFAULT_SETTINGS.aspectRatio),
+    stylePreset: oneOf(saved.stylePreset, STYLE_OPTIONS, DEFAULT_SETTINGS.stylePreset),
+    customStyle: typeof saved.customStyle === "string" ? saved.customStyle : "",
+    aiModel: typeof saved.aiModel === "string" ? saved.aiModel : DEFAULT_SETTINGS.aiModel,
+  };
 }
 
 // Fetch a list endpoint once (and on reload), exposing honest loading/error state.
@@ -153,9 +180,8 @@ export default function ScriptStudio() {
   const scriptFeature = setup.feature("script_studio");
 
   const [script, setScript] = useState("");
-  const [settings, setSettings] = useState(() => readJson(SETTINGS_KEY, DEFAULT_SETTINGS));
+  const [settings, setSettings] = useState(readSettings);
   const [name, setName] = useState("");
-  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [logo, setLogo] = useState(null); // {file, previewUrl, status, id}
   const [logoError, setLogoError] = useState("");
   const [launching, setLaunching] = useState(false);
@@ -220,7 +246,6 @@ export default function ScriptStudio() {
   const llmList = llmLoaded ? llmModels.items.map((m) => ({ ...m, id: modelId(m) })) : FALLBACK_LLM_MODELS;
   const selectedLlm = llmList.find((m) => m.id === settings.aiModel.trim());
   const selectedImageModel = imageModels.items.find((m) => modelId(m) === settings.imageModel);
-  const selectedImagePrice = formatUsd(selectedImageModel?.price_usd);
 
   // Snap stale saved selections to what the backend offers, preferring its default
   // and skipping models whose provider isn't configured.
@@ -234,6 +259,14 @@ export default function ScriptStudio() {
     const next = usable.some((m) => modelId(m) === defaultId) ? defaultId : modelId(usable[0]);
     if (next !== settings.imageModel) setSettings((s) => ({ ...s, imageModel: next }));
   }, [imageModels, settings.imageModel]);
+  // A saved voice that's no longer offered falls back to the default voice (or the first one).
+  useEffect(() => {
+    const { status, items } = voices;
+    const ids = items.map(voiceId).filter(Boolean);
+    if (status !== "ok" || !ids.length || ids.includes(settings.voiceId)) return;
+    const next = ids.includes(DEFAULT_SETTINGS.voiceId) ? DEFAULT_SETTINGS.voiceId : ids[0];
+    setSettings((s) => ({ ...s, voiceId: next }));
+  }, [voices, settings.voiceId]);
   // Once, when the catalogue arrives: replace a saved model OpenRouter no longer lists.
   const llmChecked = useRef(false);
   useEffect(() => {
@@ -250,7 +283,7 @@ export default function ScriptStudio() {
   const imageProvider = selectedImageModel?.provider;
   const imageBlocked =
     selectedImageModel && !imageUsable(selectedImageModel)
-      ? `${PROVIDER_LABELS[imageProvider] || imageProvider} isn't configured — add ${setup.envFor(imageProvider)} or choose another model.`
+      ? `${providerLabel(imageProvider)} isn't configured. Add ${setup.envFor(imageProvider)} or choose another model.`
       : null;
   const errors = {
     script: !script.trim() ? "Paste a script." : null,
@@ -259,7 +292,7 @@ export default function ScriptStudio() {
     llm: !settings.aiModel.trim()
       ? "Choose a language model."
       : llmLoaded && !selectedLlm
-        ? "Pick a model id from the list."
+        ? "Choose a model from the list."
         : null,
   };
   const uploading = logo?.status === "uploading";
@@ -302,14 +335,45 @@ export default function ScriptStudio() {
 
   const showError = (key) => (submitted ? errors[key] : null);
 
+  let voicePlaceholder = null;
+  if (voices.status === "loading") voicePlaceholder = "Loading voices…";
+  else if (voices.status === "error") voicePlaceholder = "Voices unavailable";
+  else if (voiceList.length === 0) voicePlaceholder = "No voices returned";
+  const voiceOptions = voiceList.map((v) => ({
+    value: voiceId(v),
+    label: v.description ? `${voiceName(v)} · ${v.description}` : voiceName(v),
+  }));
+
+  const imageOptions =
+    imageModels.status === "ok"
+      ? imageModels.items.map((m) => {
+          const price = formatUsd(m.price_usd);
+          const usable = imageUsable(m);
+          return {
+            value: modelId(m),
+            label: `${m.name || modelId(m)}${price ? ` · ${price} / image` : ""}`,
+            disabled: !usable,
+            suffix: usable ? null : `add ${setup.envFor(m.provider)}`,
+          };
+        })
+      : [{ value: settings.imageModel, label: imageModels.status === "loading" ? "Loading models…" : settings.imageModel }];
+
+  const llmOptions = llmList.map((m) => ({
+    value: m.id,
+    label: m.name || m.id,
+    detail: m.id,
+    meta: llmPriceShort(m),
+    group: m.id.includes("/") ? m.id.split("/")[0] : "other",
+  }));
+
   return (
     <>
       <PageHeader
         title="Script Studio"
         meta="Narrates a script, splits it into scenes, generates one image per scene and renders a subtitled video."
       />
-      <SetupBanner feature={scriptFeature} title="Script Studio" />
-      <div className="grid gap-6 px-4 py-5 md:px-6 lg:grid-cols-[minmax(0,1fr)_340px]">
+      <SetupBanner feature={scriptFeature} lead="Script Studio needs" />
+      <div className={cn(CONTAINER.editor, "grid gap-6 py-5 lg:grid-cols-[minmax(0,1fr)_340px]")}>
         <div className="min-w-0">
           <Label
             htmlFor="script"
@@ -334,216 +398,141 @@ export default function ScriptStudio() {
           <FieldError id="script-error">{showError("script")}</FieldError>
         </div>
 
-        <aside className="self-start space-y-5 rounded border border-line bg-surface p-4 lg:sticky lg:top-4">
-          <div>
-            <Label
-              htmlFor="voice"
-              hint={`ElevenLabs Multilingual v2${voices.provider ? ` via ${PROVIDER_LABELS[voices.provider]}` : ""}`}
-            >
-              Voice
-            </Label>
-            <div className="flex gap-2">
-              <Select
-                id="voice"
-                value={voiceValid ? settings.voiceId : ""}
-                onChange={(e) => set("voiceId")(e.target.value)}
-                disabled={voices.status !== "ok" || voiceList.length === 0}
-                aria-invalid={!!showError("voice") || undefined}
-                aria-describedby="voice-status"
-              >
-                <option value="">
-                  {voices.status === "loading"
-                    ? "Loading voices…"
-                    : voices.status === "error"
-                      ? "Voices unavailable"
-                      : voiceList.length === 0
-                        ? "No voices returned"
-                        : "Choose a voice"}
-                </option>
-                {voiceList.map((v) => (
-                  <option key={voiceId(v)} value={voiceId(v)}>
-                    {voiceName(v)}
-                    {v.description ? ` · ${v.description}` : ""}
-                  </option>
-                ))}
-              </Select>
-              <Button onClick={voices.reload} pending={voices.status === "loading"}>
-                Reload
-              </Button>
-            </div>
-            <div id="voice-status">
-              {voices.status === "error" && <FieldError>Couldn&apos;t load voices: {errorMessage(voices.error)}</FieldError>}
-              <FieldError>{voices.status === "ok" ? showError("voice") : null}</FieldError>
-            </div>
-          </div>
+        <SettingsPanel label="Run settings">
+          <PanelSection title="Output">
+            <SelectField
+              id="aspect-ratio"
+              label="Aspect ratio"
+              value={settings.aspectRatio}
+              onChange={set("aspectRatio")}
+              options={ASPECT_OPTIONS}
+            />
+          </PanelSection>
 
-          <div>
-            <Label htmlFor="style-preset">Visual style</Label>
-            <Select id="style-preset" value={preset.id} onChange={(e) => set("stylePreset")(e.target.value)}>
-              {STYLE_PRESETS.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.label}
-                </option>
-              ))}
-            </Select>
-            {isCustom ? (
-              <div className="mt-2">
-                <label htmlFor="custom-style" className="sr-only">
-                  Custom style
-                </label>
+          <PanelSection title="Models">
+            <SelectField
+              id="image-model"
+              label="Image model"
+              value={settings.imageModel}
+              onChange={set("imageModel")}
+              options={imageOptions}
+              disabled={imageModels.status !== "ok"}
+              error={
+                imageBlocked ||
+                (imageModels.status === "error"
+                  ? `Couldn't load image models: ${errorMessage(imageModels.error)}. The last selection will be used.`
+                  : null)
+              }
+              hint={
+                imageModels.status === "ok" && !imageBlocked
+                  ? "fal.ai prices come from its pricing API. SnapGen and Kie.ai bill in their own credits."
+                  : null
+              }
+            />
+
+            <SelectField
+              id="llm-model"
+              label="Language model"
+              labelHint="Scene split and image prompts"
+              error={showError("llm")}
+              hint={
+                llmModels.status === "loading"
+                  ? "Loading models…"
+                  : llmModels.status === "error"
+                    ? `Couldn't load the model list (${errorMessage(llmModels.error)}). Type an OpenRouter model id.`
+                    : selectedLlm
+                      ? `${selectedLlm.id}${llmPrice(selectedLlm) ? ` · ${llmPrice(selectedLlm)}` : ""}`
+                      : null
+              }
+              control={(props) => (
+                <Combobox
+                  {...props}
+                  value={settings.aiModel}
+                  onChange={set("aiModel")}
+                  options={llmOptions}
+                  allowCustom={!llmLoaded}
+                  placeholder="Search models, e.g. claude"
+                  emptyText="No models match."
+                />
+              )}
+            />
+
+            <div>
+              <SelectField
+                id="voice"
+                label="Voice"
+                labelHint={`ElevenLabs Multilingual v2${voices.provider ? ` via ${providerLabel(voices.provider)}` : ""}`}
+                value={voiceValid ? settings.voiceId : ""}
+                onChange={set("voiceId")}
+                options={voiceOptions}
+                placeholder={voicePlaceholder}
+                disabled={voices.status !== "ok" || voiceList.length === 0}
+                error={
+                  voices.status === "error"
+                    ? `Couldn't load voices: ${errorMessage(voices.error)}`
+                    : voices.status === "ok"
+                      ? showError("voice")
+                      : null
+                }
+              />
+              {voices.status === "error" && (
+                <Button size="sm" variant="ghost" className="-ml-2 mt-1" onClick={voices.reload}>
+                  Try again
+                </Button>
+              )}
+            </div>
+          </PanelSection>
+
+          <PanelSection title="Style">
+            <SelectField
+              id="style-preset"
+              label="Visual style"
+              value={preset.id}
+              onChange={set("stylePreset")}
+              options={STYLE_OPTIONS}
+              hint={isCustom ? null : `Added to every scene image prompt: ${preset.value}`}
+            />
+            {isCustom && (
+              <div>
+                <Label htmlFor="custom-style">Custom style</Label>
                 <Input
                   id="custom-style"
                   value={settings.customStyle}
                   onChange={(e) => set("customStyle")(e.target.value)}
                   placeholder="e.g. vintage 1970s film photograph, warm faded tones"
                   aria-invalid={!!showError("style") || undefined}
-                  aria-describedby="custom-style-error"
+                  aria-describedby="custom-style-error custom-style-hint"
                 />
                 <FieldError id="custom-style-error">{showError("style")}</FieldError>
-              </div>
-            ) : (
-              <Hint>Added to every scene image prompt: {preset.value}</Hint>
-            )}
-          </div>
-
-          <div>
-            <Label
-              htmlFor="image-model"
-              hint={selectedImagePrice ? <span className="font-mono">{selectedImagePrice} / image</span> : null}
-            >
-              Image model
-            </Label>
-            <Select
-              id="image-model"
-              value={settings.imageModel}
-              onChange={(e) => set("imageModel")(e.target.value)}
-              disabled={imageModels.status !== "ok"}
-              aria-describedby="image-model-status"
-            >
-              {imageModels.status !== "ok" && (
-                <option value={settings.imageModel}>
-                  {imageModels.status === "loading" ? "Loading models…" : settings.imageModel}
-                </option>
-              )}
-              {imageModels.items.map((m) => {
-                const price = formatUsd(m.price_usd);
-                const usable = imageUsable(m);
-                return (
-                  <option key={modelId(m)} value={modelId(m)} disabled={!usable}>
-                    {m.name || modelId(m)}
-                    {price ? ` · ${price}` : ""}
-                    {usable ? "" : ` — add ${setup.envFor(m.provider)} to enable`}
-                  </option>
-                );
-              })}
-            </Select>
-            <div id="image-model-status">
-              {imageModels.status === "error" && (
-                <FieldError>
-                  Couldn&apos;t load image models: {errorMessage(imageModels.error)}. The last selection will be used.
-                </FieldError>
-              )}
-              {imageBlocked && <FieldError>{imageBlocked}</FieldError>}
-              {imageModels.status === "ok" && !imageBlocked && (
-                <Hint>Prices come from fal.ai&apos;s pricing API; SnapGen and Kie.ai bill in their own credits.</Hint>
-              )}
-            </div>
-          </div>
-
-          <div>
-            <Label htmlFor="llm-model" hint="OpenRouter · scene split and image prompts">
-              Language model
-            </Label>
-            <Input
-              id="llm-model"
-              list="llm-model-options"
-              value={settings.aiModel}
-              onChange={(e) => set("aiModel")(e.target.value)}
-              onFocus={(e) => e.target.select()}
-              spellCheck={false}
-              autoComplete="off"
-              placeholder="Search models, e.g. claude"
-              aria-invalid={!!showError("llm") || undefined}
-              aria-describedby="llm-status"
-              className="font-mono text-xs"
-            />
-            <datalist id="llm-model-options">
-              {llmList.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.name || m.id}
-                </option>
-              ))}
-            </datalist>
-            <div id="llm-status">
-              {selectedLlm && (
-                <Hint>
-                  {selectedLlm.name}
-                  {llmPrice(selectedLlm) ? ` · ${llmPrice(selectedLlm)}` : ""}
-                </Hint>
-              )}
-              {llmModels.status === "loading" && <Hint>Loading models…</Hint>}
-              {llmModels.status === "error" && (
-                <Hint>Couldn&apos;t load the model list ({errorMessage(llmModels.error)}). Enter an OpenRouter model id.</Hint>
-              )}
-              <FieldError>{showError("llm")}</FieldError>
-            </div>
-          </div>
-
-          <Segmented
-            name="script-aspect"
-            legend="Aspect ratio"
-            value={settings.aspectRatio}
-            onChange={set("aspectRatio")}
-            options={[
-              { value: "16:9", label: "16:9" },
-              { value: "9:16", label: "9:16" },
-            ]}
-          />
-
-          <div>
-            <p className="mb-1.5 text-sm font-medium text-fg">
-              Watermark logo <span className="font-normal text-fg-muted">(optional)</span>
-            </p>
-            <LogoField logo={logo} onPick={pickLogo} onClear={clearLogo} />
-            <FieldError>{logoError}</FieldError>
-            {logo && <Hint>The background is removed and the logo is placed in a corner at 35% opacity.</Hint>}
-          </div>
-
-          <div className="border-t border-line pt-4">
-            <button
-              type="button"
-              aria-expanded={advancedOpen}
-              aria-controls="script-advanced"
-              onClick={() => setAdvancedOpen((o) => !o)}
-              className="flex items-center gap-1.5 text-sm font-medium text-fg-secondary hover:text-fg"
-            >
-              {advancedOpen ? (
-                <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
-              ) : (
-                <ChevronRight className="h-3.5 w-3.5" aria-hidden="true" />
-              )}
-              Advanced
-            </button>
-            {advancedOpen && (
-              <div id="script-advanced" className="mt-3">
-                <Label htmlFor="script-run-name">Run name</Label>
-                <Input
-                  id="script-run-name"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  placeholder="Script + date and time"
-                  aria-describedby="script-run-name-hint"
-                />
-                <Hint id="script-run-name-hint">Leave empty to name it after the start time.</Hint>
+                <Hint id="custom-style-hint">Added to every scene image prompt.</Hint>
               </div>
             )}
-          </div>
+            <div>
+              <p className="mb-1.5 text-sm font-medium text-fg">
+                Watermark logo <span className="font-normal text-fg-muted">(optional)</span>
+              </p>
+              <LogoField logo={logo} onPick={pickLogo} onClear={clearLogo} />
+              <FieldError>{logoError}</FieldError>
+              {logo && <Hint>The background is removed and the logo is placed in a corner at 35% opacity.</Hint>}
+            </div>
+          </PanelSection>
 
-          <div className="border-t border-line pt-4">
+          <PanelSection>
             <Estimate query={estimateQuery} />
-          </div>
+          </PanelSection>
 
-          <div className="border-t border-line pt-4">
+          <PanelSection>
+            <div>
+              <Label htmlFor="script-run-name" hint="Optional">
+                Run name
+              </Label>
+              <Input
+                id="script-run-name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="Script + start date and time"
+              />
+            </div>
             <Button
               variant="primary"
               size="lg"
@@ -554,10 +543,10 @@ export default function ScriptStudio() {
             >
               Launch run
             </Button>
-            {notReadyReason && <Hint>Launch is disabled: {notReadyReason}</Hint>}
-            {uploading && <Hint>Waiting for the logo upload to finish.</Hint>}
-          </div>
-        </aside>
+            {notReadyReason && <Hint className="mt-0">{notReadyReason}</Hint>}
+            {uploading && <Hint className="mt-0">Waiting for the logo upload to finish.</Hint>}
+          </PanelSection>
+        </SettingsPanel>
       </div>
     </>
   );

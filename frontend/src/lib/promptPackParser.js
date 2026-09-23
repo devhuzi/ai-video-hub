@@ -60,7 +60,7 @@ export function parsePromptPack(text) {
   if (imagePrompts.length === 0 && videoPrompts.length === 0) {
     return {
       ...empty,
-      error: "Could not find any image or video prompts. Try JSON, or label sections like \"Image Prompts:\" and \"Video Prompts:\".",
+      error: "Couldn't find any image or video prompts. Try JSON, or label sections like \"Image Prompts:\" and \"Video Prompts:\".",
     };
   }
 
@@ -110,7 +110,7 @@ export function detectMode(imagePrompts, videoPrompts) {
     return { mode: "extend", shape: "extend", videoSystem: "grok_sequential_extend", error: null };
   }
 
-  return { mode: null, shape: null, videoSystem: null, error: "Need at least 1 image prompt." };
+  return { mode: null, shape: null, videoSystem: null, error: "Add at least one image prompt." };
 }
 
 // Plain-language explanation of how each video uses the images.
